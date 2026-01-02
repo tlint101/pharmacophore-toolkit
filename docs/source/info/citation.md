@@ -11,3 +11,5 @@ If you find Pharmacophore-Toolkit useful in your research or work, please consid
   version = {v1.0.0}
 }
 ```
+
+Modify the version based on what is used for a given project accordingly. 
