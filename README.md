@@ -1,15 +1,16 @@
 # A Simple Pharmacophore-Toolkit
 
 [![Pharmacophore-Toolkit Versions](https://img.shields.io/pypi/v/pharmacophore-toolkit.svg?label=Pharmacophore-Toolkit&color=blue)](https://pypi.org/project/pharmacophore-toolkit/)
-[![Python Versions](https://img.shields.io/pypi/pyversions/pharmacophore-toolkit?style=flat&logo=python&logoColor=white)](https://pypi.org/project/mol-inspector/)
-[![PyPI - Python Version](https://img.shields.io/pypi/v/pharmacophore-toolkit.svg)](https://pypi.org/project/pharmacophore-toolkit/)
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![Python Versions](https://img.shields.io/pypi/pyversions/pharmacophore-toolkit?style=flat&logo=python&logoColor=white)](https://pypi.org/project/pharmacophore-toolkit/)
+[![Read the Docs](https://readthedocs.org/projects/pharmacophore-toolkit/badge/?version=latest)](https://pharmacophore-toolkit.readthedocs.io/en/latest/#)
+
 
 The Pharmacophore-Toolkit is built on RDKit and allows for building simple pharmacophore models. The
 Pharmacophore-Toolset can generate models from crystal structures, docking poses, or SMILES string. To generate a 3D
 model, a .pml file will be generated. This files contains scripts to generate spheres with color and XYZ coordinates
-defined. The final 3D image can be rendered in PyMOL. Additional information can be found under the
-[Tutorials](tutorials/) section.
+defined. The final 3D image can be rendered in PyMOL. 
+
+Documentation for the project can be found [here](https://pharmacophore-toolkit.readthedocs.io/en/latest/#).
 
 ## Install
 
@@ -41,7 +42,7 @@ Conda installation solved the problem on my machine, but may differ with yours.
 
 ## Tutorials
 
-Tutorials are written as JupyterNotebooks and can be found [here](tutorials/). The Pharmacophore-Toolkit can generate 
+Tutorials are written as JupyterNotebooks and can be found [here](https://pharmacophore-toolkit.readthedocs.io/en/latest/tutorials/tutorials.html). The Pharmacophore-Toolkit can generate 
 several types of images:
 
 ## Example Images
