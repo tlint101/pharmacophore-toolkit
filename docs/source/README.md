@@ -1,8 +1,7 @@
 # A Simple Pharmacophore-Toolkit
 
 [![Pharmacophore-Toolkit Versions](https://img.shields.io/pypi/v/pharmacophore-toolkit.svg?label=Pharmacophore-Toolkit&color=blue)](https://pypi.org/project/pharmacophore-toolkit/)
-[![Python Versions](https://img.shields.io/pypi/pyversions/pharmacophore-toolkit?style=flat&logo=python&logoColor=white)](https://pypi.org/project/pharmacophore-toolkit/)
-
+[![Python Versions](https://img.shields.io/badge/python-3.9+-blue.svg?logo=python&logoColor=white)](https://pypi.org/project/pharmacophore-toolkit/)
 
 The Pharmacophore-Toolkit is built on RDKit and allows for building simple pharmacophore models. The
 Pharmacophore-Toolset can generate models from crystal structures, docking poses, or SMILES string. To generate a 3D

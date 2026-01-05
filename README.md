@@ -1,7 +1,8 @@
 # A Simple Pharmacophore-Toolkit
 
 [![Pharmacophore-Toolkit Versions](https://img.shields.io/pypi/v/pharmacophore-toolkit.svg?label=Pharmacophore-Toolkit&color=blue)](https://pypi.org/project/pharmacophore-toolkit/)
-[![Python Versions](https://img.shields.io/pypi/pyversions/pharmacophore-toolkit?style=flat&logo=python&logoColor=white)](https://pypi.org/project/pharmacophore-toolkit/)
+[![Python Versions](https://img.shields.io/badge/python-3.9+-blue.svg?logo=python&logoColor=white)](https://pypi.org/project/pharmacophore-toolkit/)
+[![Pharmacophore-Toolsets Test](https://github.com/tlint101/pharmacophore-toolkit/actions/workflows/tests.yml/badge.svg)](https://github.com/tlint101/pharmacophore-toolkit/actions/workflows/tests.yml)
 [![Read the Docs](https://readthedocs.org/projects/pharmacophore-toolkit/badge/?version=latest)](https://pharmacophore-toolkit.readthedocs.io/en/latest/#)
 
 
