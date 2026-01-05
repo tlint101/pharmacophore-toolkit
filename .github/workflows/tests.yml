@@ -1,9 +1,9 @@
 name: Pharmacophore-Toolsets Test
 on:
   push:
-    branches: ["main", "master"]
+    branches: [ "main", "master" ]
   pull_request:
-    branches: ["main", "master"]
+    branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
@@ -13,26 +13,33 @@ jobs:
       fail-fast: false
       matrix:
         # python versions
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+        python-version: [ "3.9", "3.10", "3.11", "3.12", "3.13", "3.14" ]
 
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python-version }}
-        cache: 'pip'
+      - name: Install Linux System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev
 
-    - name: Install Dependencies
-      run: |
-        python -m pip install --upgrade pip
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-        pip install pytest
-        pip install -e .
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
 
-    # run tests
-    - name: Run Tests
-      run: |
-        pytest
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # force install CairoSVG
+          pip install "CairoSVG>=2.7.1"  
+          pip install pytest
+          pip install -e .
+
+      # run tests
+      - name: Run Tests
+        run: |
+          pytest
