@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "pharmacophore-toolkit"
-version = "0.0.5"
+version = "1.0.0"
 description = "A simple pharmacophore modeling toolkit"
 authors = ["Tony Eight Lin <tonyelin@tmu.edu.tw>"]
 license = "GPL-3.0-or-later"
@@ -15,7 +15,7 @@ pandas = ">=2.0.0"
 numpy = ">=2.0.0"
 matplotlib = ">=3.*"
 ipython = ">=8.*"
-ipywidgets = ">=8."
+ipywidgets = ">=8.*"
 py3Dmol = ">=2.4.2"
 CairoSVG = ">=2.7.1"
 tqdm = "*"
