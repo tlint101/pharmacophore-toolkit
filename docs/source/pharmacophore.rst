@@ -1,4 +1,4 @@
-pharmacophore package
+pharmacophore
 =====================
 
 Submodules

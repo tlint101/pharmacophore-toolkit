@@ -46,6 +46,14 @@ source_suffix = {
     ".myst": "myst-nb",
 }
 
+# mock imports
+autodoc_mock_imports = [
+    "rdkit",
+    "numpy",
+    "pandas",
+    "matplotlib"
+]
+
 html_theme_options = {
     "repository_url": "https://github.com/tlint101/Pharmacophore-Toolkit",
     "show_toc_level": 3,
