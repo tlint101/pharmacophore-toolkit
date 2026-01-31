@@ -39,6 +39,11 @@ myst_enable_extensions = [
 templates_path = ['_templates']
 exclude_patterns = []
 
+# mock import
+autodoc_mock_imports = [
+    'cairosvg'
+]
+
 source_suffix = {
     ".rst": "restructuredtext",
     ".md": "myst-nb",

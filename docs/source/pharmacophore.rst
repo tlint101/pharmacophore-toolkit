@@ -4,7 +4,7 @@ pharmacophore
 Submodules
 ----------
 
-pharmacophore.constants module
+pharmacophore.constants
 ------------------------------
 
 .. automodule:: pharmacophore.constants
@@ -12,7 +12,7 @@ pharmacophore.constants module
    :show-inheritance:
    :undoc-members:
 
-pharmacophore.draw module
+pharmacophore.draw
 -------------------------
 
 .. automodule:: pharmacophore.draw
@@ -20,18 +20,10 @@ pharmacophore.draw module
    :show-inheritance:
    :undoc-members:
 
-pharmacophore.pharmacophore module
+pharmacophore.pharmacophore
 ----------------------------------
 
 .. automodule:: pharmacophore.pharmacophore
-   :members:
-   :show-inheritance:
-   :undoc-members:
-
-Module contents
----------------
-
-.. automodule:: pharmacophore
    :members:
    :show-inheritance:
    :undoc-members:
