@@ -5,7 +5,7 @@ from rdkit.Chem.Crippen import MolLogP
 from typing import Optional
 
 
-class ActivityCliffs:  #todo finalize class name
+class SAR:
     def __init__(self, smi: list, activity: list):
         self.smi_list = smi
         self.act_list = activity
