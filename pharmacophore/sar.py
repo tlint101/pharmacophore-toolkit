@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import py3Dmol
 from rdkit import Chem, DataStructs
 from rdkit.Chem import Draw, rdFMCS, rdDepictor, AllChem
 from rdkit.Chem.Crippen import MolLogP
@@ -10,6 +11,7 @@ from typing import Optional, Union
 # todo document methods
 class SAR:
     def __init__(self, data: pd.DataFrame, smi_col: str = "smiles", act_col: str = "activity", units: str = "nM"):
+        self.atom_difference = None
         self.smi_col = smi_col
         self.act_col = act_col
 
@@ -169,6 +171,9 @@ class SAR:
             diff_atoms = [atom.GetIdx() for atom in mol.GetAtoms() if atom.GetIdx() not in match_atoms]
             atom_difference.append(diff_atoms)
 
+        # save for view
+        self.atom_difference = atom_difference
+
         if legend is None:
             try:
                 legend = self.data['name'].tolist()
@@ -200,60 +205,141 @@ class SAR:
 
         return img
 
+    def output_cliffs(self):
+        pass
 
-class View:
-    def __init__(self, mol: Optional[Union[Chem.Mol, list[Chem.Mol]]] = None,
-                 pharmacophore: Optional[Union[str, dict]] = 'default'):
-        self.mol = mol
-        self.pharmacophore = pharmacophore
-        self.diff_atoms_list = None
+    # todo move atom_differences to self.differences
+    def view_cliffs(self, mols: Union[Chem.Mol, list[Chem.Mol]] = None, protein_path: str = None,
+                    window: tuple = (500, 500)):
+        """
+        View the activity cliffs of molecules in py3Dmol. Only atoms not found using Maximum Common Substructure (MCS)
+        will be highlighted.
+        :param mols: Union[Chem.Mol, list[Chem.Mol]]
+            RDKit molecule object for rendering. Should be the same as the smiles given as the pd.DataFrame input when
+            initializing SAR.
+        :param protein_path: str
+            Filepath to the target protein structure.
+        :param window: tuple
+            Set the windows size of the visualization window.
+        :return:
+        """
 
-    def view_cliffs(self, mols: Optional[Union[list[Chem.Mol]]] = None):
-        if mols is None:
-            mols = self.mol
+        self.mols = mols
+        self.window = window
+        self.protein_path = protein_path
 
-        # check num of mols
-        if len(mols) != 2:
-            raise ValueError("Need 2 Molecules!")
+        # dropdown menu
+        if isinstance(mols, Chem.Mol):
+            drop_options = [("Molecule 1", 0)]
+        else:
+            drop_options = [(f"Molecule {i + 1}", i) for i in range(len(mols))]
 
-        # find MCS as SMARTS
-        mcs_result = rdFMCS.FindMCS(mols)
-        mcs_mol = Chem.MolFromSmarts(mcs_result.smartsString)
+        import ipywidgets as widgets
+        dropdown = widgets.Dropdown(
+            options=drop_options,
+            value=0,
+            description="Select:",
+            style={"description_width": "initial"}
+        )
 
-        # find matches
-        match_atoms_list = []
-        diff_atoms_list = []
+        widgets.interact(self._render_cliffs, index=dropdown)
 
-        for mol in mols:
-            # get MCS matches
-            match_atoms = mol.GetSubstructMatch(mcs_mol)
-            match_atoms_list.append(match_atoms)
-
-            # identify atoms not in MCS
-            diff_atoms = [atom.GetIdx() for atom in mol.GetAtoms() if atom.GetIdx() not in match_atoms]
-            diff_atoms_list.append(diff_atoms)
-
-        # set vars to self for use in _render_cliffs
-        self.diff_atoms_list = diff_atoms_list
-
-        return self.diff_atoms_list
-
-        # # dropdown menu
-        # import ipywidgets as widgets
-        # dropdown = widgets.Dropdown(
-        #     options=[(f"Molecule {i + 1}", i) for i in range(len(mols))],
-        #     value=0,
-        #     description="Select:",
-        #     style={"description_width": "initial"}
-        # )
-        #
-        # widgets.interact(self._render_cliffs, index=dropdown)
-
-    def _render_cliffs(self, mols: list[Chem.Mol], diff_atoms_list: list[list[int]]):
+    def _render_cliffs(self, index):
         """
         Render molecules with fog effect on differing atoms
         """
-        # Create py3dmol view - make sure to use the right import name (lowercase d)
+        if isinstance(self.mols, Chem.Mol):
+            mol = self.mols
+        else:
+            mol = self.mols[index]
+        mol_block = Chem.MolToMolBlock(mol)
+
+        viewer = py3Dmol.view(width=self.window[0], height=self.window[1])
+        viewer.setBackgroundColor("white")
+        viewer.addModel(mol_block, "mol")
+        viewer.zoomTo()
+
+        # set protein
+        if self.protein_path:
+            with open(self.protein_path, 'r') as f:
+                pdb_data = f.read()
+            viewer.addModel(pdb_data, "pdb")
+            # protein style
+            viewer.setStyle({'model': -1}, {'cartoon': {'color': 'lightgray', 'opacity': 0.6},
+                                            'line': {'color': 'lightgray', 'opacity': 0.3}})
+
+        # set ligand
+        viewer.addModel(Chem.MolToPDBBlock(mol), "mol")
+        viewer.setStyle({'stick': {'radius': 0.15, 'colorscheme': 'grayCarbon'}})
+
+        flat_indices = [idx for sublist in self.atom_difference for idx in sublist]
+        # check if indices found in query mol
+        flat_indices = [idx for idx in flat_indices if idx < mol.GetNumAtoms()]
+
+        # track aromatic atoms
+        aromatic_atom_indices = set()
+        ring_info = mol.GetRingInfo()
+        for ring in ring_info.AtomRings():
+            # check if aromatic atom not in MCS
+            if all(mol.GetAtomWithIdx(idx).GetIsAromatic() for idx in ring):
+                if any(idx in flat_indices for idx in ring):
+                    # calculate centroid
+                    conf = mol.GetConformer()
+                    coords = [conf.GetAtomPosition(idx) for idx in ring]
+                    centroid = np.mean(coords, axis=0)
+
+                    # add sphere
+                    viewer.addSphere({
+                        'center': {'x': centroid[0], 'y': centroid[1], 'z': centroid[2]},
+                        'radius': 0.5,
+                        'color': 'yellow',
+                        'opacity': 0.7
+                    })
+                    # tag aromatic atoms
+                    for idx in ring: aromatic_atom_indices.add(idx)
+
+        # track other atoms
+        for idx in flat_indices:
+            atom = mol.GetAtomWithIdx(idx)
+            symbol = atom.GetSymbol()
+
+            # tag donor/acceptor
+            is_donor = symbol in ['N', 'O', 'S'] and atom.GetTotalNumHs() > 0
+            is_acceptor = symbol in ['N', 'O'] and atom.GetFormalCharge() <= 0
+            # use if halogens are listed as acceptors
+            # is_acceptor = symbol in ['N', 'O', 'F', 'Cl', 'Br', 'I'] and atom.GetFormalCharge() <= 0
+
+            # set color var
+            color = None
+            # donor/acceptor colorscheme
+            if is_donor and is_acceptor:
+                color = 'magenta'
+            elif is_donor:
+                color = 'blue'
+            elif is_acceptor:
+                color = 'red'
+
+            # hydrophobic colorscheme
+            elif idx not in aromatic_atom_indices:
+                if symbol in ['C', 'F', 'Cl', 'Br', 'I'] and not atom.GetIsAromatic():
+                    # only use 'C' if halogens are going to be acceptors
+                    # if symbol == 'C':
+                    color = '#2ecc71'
+                else:
+                    color = '#7f8c8d'
+
+            # apply style
+            if color:
+                viewer.addStyle({'index': idx}, {
+                    'sphere': {
+                        'color': color,
+                        'opacity': 0.7,
+                        'radius': 0.7 if idx in aromatic_atom_indices else 1.0
+                    }
+                })
+
+        viewer.zoomTo()
+        return viewer.show()
 
 
 def _calculate_pic50(activity: Optional[list], units: str = "nM"):
@@ -280,7 +366,14 @@ def _calculate_pic50(activity: Optional[list], units: str = "nM"):
 
 
 def _color_to_rgb(color_input):
+    """Support function to convert Matplotlib colors to RGB for RDKit highlighting"""
     try:
         return mcolors.to_rgb(color_input)
     except ValueError:
         return f"Error: '{color_input}' is not a recognized color name or hex code."
+
+
+if __name__ == "__main__":
+    import doctest
+
+    doctest.testmod()
