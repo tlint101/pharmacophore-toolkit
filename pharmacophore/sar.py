@@ -1,10 +1,13 @@
 import pandas as pd
 import numpy as np
 from rdkit import Chem, DataStructs
+from rdkit.Chem import Draw, rdFMCS, rdDepictor, AllChem
 from rdkit.Chem.Crippen import MolLogP
-from typing import Optional
+import matplotlib.colors as mcolors
+from typing import Optional, Union
 
 
+# todo document methods
 class SAR:
     def __init__(self, data: pd.DataFrame, smi_col: str = "smiles", act_col: str = "activity", units: str = "nM"):
         self.smi_col = smi_col
@@ -61,16 +64,12 @@ class SAR:
 
         return self.data
 
-    def get_sali(self, smi_col: Optional[list] = None, act_col: Optional[list] = None, ic50: bool = False,
-                 units: str = "nM"):
+    def get_sali(self, smi_col: Optional[list] = None):
         if smi_col is None:
             smi_col = self.smi_col
-        if act_col is None:
-            act_col = self.act_col
 
         data = self.data
         smi_list = data[smi_col].tolist()
-        act_list = data[act_col].tolist()
         pIC50_list = data['pIC50'].tolist()
 
         # add fp col
@@ -103,8 +102,158 @@ class SAR:
 
         return sal_df
 
-    def get_cliffs(self):
-        return pd.DataFrame(self.act_list)  # a df containing smiles string, sali score, ic50 and molecule
+    def highlight_cliffs(self, smi_col: Optional[list] = None, ncols: int = 2, subsize: tuple = (400, 400),
+                         legend: list = None, highlight_color: str = None, radius: int = 0.3, SVG: bool = False,
+                         savepath: str = None):
+        """
+        Draw and highlight differing structures in 2D. For each molecule, the Maximum Common Substructure (MCS) is
+        identified. Only differing functional groups will be highlighted. Information is pulled from the pd.DataFrame
+        given when initializing class SAR().
+        :param smi_col: str
+            Column name containing SMILES strings.
+        :param ncols: int
+        :param subsize: tuple
+        :param legend: list
+        :param highlight_color: str
+            Set the color style of the highlights. Names must be found in Matplotlib.
+        :param radius: int
+            Set the highlight radius.
+        :param SVG: bool
+        :param savepath: str
+        :return:
+        """
+        if smi_col is None:
+            smi_col = self.smi_col
+
+        # extract smi and convert to RDKit object
+        smi_list = self.data[smi_col].tolist()
+        mol_list = [Chem.MolFromSmiles(smi) for smi in smi_list]
+
+        # checks
+        if len(mol_list) == 0:
+            raise ValueError("No valid molecules found from provided SMILES")
+
+            # if only one molecule, handle specially (can't find MCS)
+        if len(mol_list) == 1:
+            print("Only one molecule provided, no MCS can be calculated.")
+            img = Draw.MolsToGridImage(
+                mol_list,
+                molsPerRow=1,
+                subImgSize=(400, 400),
+                legends=[f"Molecule {i + 1}" for i in range(len(mol_list))]
+            )
+            if savepath:
+                img.save(savepath)
+            return img
+
+        # find mcs and create RDKit object
+        mcs = rdFMCS.FindMCS(mol_list)
+        mcs_mol = Chem.MolFromSmarts(mcs.smartsString)
+
+        # align mols
+        try:
+            ref = Chem.MolFromSmiles(smi_list[0])
+            AllChem.Compute2DCoords(ref)
+            for mol in mol_list:
+                AllChem.GenerateDepictionMatching2DStructure(mol, ref)
+        except Exception as e:
+            print(f"{e}\nCannot Align Molecules.")
+
+        # extract matching atoms
+        atom_match = []
+        atom_difference = []
+        for mol in mol_list:
+            match_atoms = mol.GetSubstructMatch(mcs_mol)
+            atom_match.append(match_atoms)
+
+            diff_atoms = [atom.GetIdx() for atom in mol.GetAtoms() if atom.GetIdx() not in match_atoms]
+            atom_difference.append(diff_atoms)
+
+        if legend is None:
+            try:
+                legend = self.data['name'].tolist()
+            except Exception as e:
+                raise Exception(f"{e}\nCannot find 'name' column. No legend set!")
+
+        if highlight_color is None:
+            highlight_colors = None
+        else:
+            highlight = _color_to_rgb(highlight_color)
+            # give color palette to each mol
+            highlight_colors = [{atom_idx: highlight for atom_idx in atom_list} for atom_list in atom_difference]
+
+        # set highlight radius
+        opts = Draw.MolDrawOptions()
+        opts.highlightRadius = radius
+
+        # draw molecules
+        img = Draw.MolsToGridImage(
+            mols=mol_list,
+            molsPerRow=ncols,
+            subImgSize=subsize,
+            legends=legend,
+            highlightAtomLists=atom_difference,
+            highlightAtomColors=highlight_colors,
+            drawOptions=opts,
+            useSVG=SVG,
+        )
+
+        return img
+
+
+class View:
+    def __init__(self, mol: Optional[Union[Chem.Mol, list[Chem.Mol]]] = None,
+                 pharmacophore: Optional[Union[str, dict]] = 'default'):
+        self.mol = mol
+        self.pharmacophore = pharmacophore
+        self.diff_atoms_list = None
+
+    def view_cliffs(self, mols: Optional[Union[list[Chem.Mol]]] = None):
+        if mols is None:
+            mols = self.mol
+
+        # check num of mols
+        if len(mols) != 2:
+            raise ValueError("Need 2 Molecules!")
+
+        # find MCS as SMARTS
+        mcs_result = rdFMCS.FindMCS(mols)
+        mcs_mol = Chem.MolFromSmarts(mcs_result.smartsString)
+
+        # find matches
+        match_atoms_list = []
+        diff_atoms_list = []
+
+        for mol in mols:
+            # get MCS matches
+            match_atoms = mol.GetSubstructMatch(mcs_mol)
+            match_atoms_list.append(match_atoms)
+
+            # identify atoms not in MCS
+            diff_atoms = [atom.GetIdx() for atom in mol.GetAtoms() if atom.GetIdx() not in match_atoms]
+            diff_atoms_list.append(diff_atoms)
+
+        # set vars to self for use in _render_cliffs
+        self.diff_atoms_list = diff_atoms_list
+
+        return self.diff_atoms_list
+
+        # # dropdown menu
+        # import ipywidgets as widgets
+        # dropdown = widgets.Dropdown(
+        #     options=[(f"Molecule {i + 1}", i) for i in range(len(mols))],
+        #     value=0,
+        #     description="Select:",
+        #     style={"description_width": "initial"}
+        # )
+        #
+        # widgets.interact(self._render_cliffs, index=dropdown)
+
+    def _render_cliffs(self, mols: list[Chem.Mol], diff_atoms_list: list[list[int]]):
+        """
+        Render molecules with fog effect on differing atoms
+        """
+        # Create py3dmol view - make sure to use the right import name (lowercase d)
 
 
 def _calculate_pic50(activity: Optional[list], units: str = "nM"):
@@ -128,3 +277,10 @@ def _calculate_pic50(activity: Optional[list], units: str = "nM"):
         pic50.append(converted_ic)
 
     return pic50
+
+
+def _color_to_rgb(color_input):
+    try:
+        return mcolors.to_rgb(color_input)
+    except ValueError:
+        return f"Error: '{color_input}' is not a recognized color name or hex code."
