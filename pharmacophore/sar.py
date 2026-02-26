@@ -205,10 +205,87 @@ class SAR:
 
         return img
 
-    def output_cliffs(self):
-        pass
+    def output_cliffs(self, mols: Chem.Mol = None, savepath: str = None):
+        """
+        Output the activity cliffs for molecule as .pml file for rendering in PyMOL.
+        :param mols: Chem.Mol
+            Input the RDKit molecule object to generate the activity cliffs.
+        :param savepath: str
+            Savepath for the .pml file.
+        :return:
+        """
+        if mols is None:
+            mol = self.mols
+        else:
+            mol = mols
 
-    # todo move atom_differences to self.differences
+        flat_indices = [idx for sublist in self.atom_difference for idx in sublist]
+        # check if indices found in query mol
+        flat_indices = [idx for idx in flat_indices if idx < mol.GetNumAtoms()]
+
+        with open(savepath, "w") as f:
+            # define color scheme
+            f.write("set_color Hydrophob, [46, 204, 113]\n")
+            f.write("set_color HDonor, [33, 150, 243]\n")
+            f.write("set_color HAcceptor, [244, 67, 54]\n")
+            f.write("set_color DualH, [255, 0, 255]\n")
+            f.write("set_color Aromatic, [255, 235, 59]\n")
+
+            # generate aromatic psudoatom points
+            aromatic_atom_indices = set()
+            ring_info = mol.GetRingInfo()
+            for x, ring in enumerate(ring_info.AtomRings()):
+                if all(mol.GetAtomWithIdx(idx).GetIsAromatic() for idx in ring):
+                    if any(idx in flat_indices for idx in ring):
+                        conf = mol.GetConformer()
+                        coords = [conf.GetAtomPosition(idx) for idx in ring]
+                        centroid = np.mean(coords, axis=0)
+
+                        obj_name = f"Aromatic_{x}"
+                        f.write(
+                            f"pseudoatom {obj_name}, pos=[{centroid[0]:.3f}, {centroid[1]:.3f}, {centroid[2]:.3f}]\n")
+                        f.write(f"show spheres, {obj_name}\n")
+                        f.write(f"hide nonbonded, {obj_name}\n")  # This removes the "plus" sign
+                        f.write(f"set sphere_scale, 0.5, {obj_name}\n")
+                        f.write(f"color Aromatic, {obj_name}\n")
+                        f.write(f"set sphere_transparency, 0.0, {obj_name}\n")
+
+                        for idx in ring:
+                            aromatic_atom_indices.add(idx)
+
+            # generate atom points
+            for idx in flat_indices:
+                atom = mol.GetAtomWithIdx(idx)
+                symbol = atom.GetSymbol()
+                pos = conf.GetAtomPosition(idx)
+
+                donor = symbol in ['N', 'O', 'S'] and atom.GetTotalNumHs() > 0
+                acceptor = symbol in ['N', 'O'] and atom.GetFormalCharge() <= 0
+
+                color = None
+                label = ""
+                if donor and acceptor:
+                    color, label = "DualH", "Dual"
+                elif donor:
+                    color, label = "HDonor", "Donor"
+                elif acceptor:
+                    color, label = "HAcceptor", "Acceptor"
+                elif idx not in aromatic_atom_indices and symbol in ['C', 'Cl', 'Br', 'I']:
+                    color, label = "Hydrophob", "Hydrophobic"
+
+                if color:
+                    obj_name = f"Pin_{label}_{idx}"
+                    f.write(f"pseudoatom {obj_name}, pos=[{pos.x:.3f}, {pos.y:.3f}, {pos.z:.3f}]\n")
+                    f.write(f"show spheres, {obj_name}\n")
+                    f.write(f"color {color}, {obj_name}\n")
+                    f.write(f"set sphere_transparency, 0.3, {obj_name}\n")
+                    # f.write(f"hide nonbonded, {obj_name}\n")  # This removes the "plus" sign
+                    # Smaller spheres for atoms inside aromatic rings
+                    scale = 0.7 if idx in aromatic_atom_indices else 1.0
+                    f.write(f"set sphere_scale, {scale}, {obj_name}\n")
+
+            f.write("zoom all\n")
+
     def view_cliffs(self, mols: Union[Chem.Mol, list[Chem.Mol]] = None, protein_path: str = None,
                     window: tuple = (500, 500)):
         """
@@ -231,6 +308,8 @@ class SAR:
         # dropdown menu
         if isinstance(mols, Chem.Mol):
             drop_options = [("Molecule 1", 0)]
+        elif mols is None:
+            raise ValueError(f"No valid RDKit molecules given!")
         else:
             drop_options = [(f"Molecule {i + 1}", i) for i in range(len(mols))]
 
@@ -257,6 +336,7 @@ class SAR:
         viewer = py3Dmol.view(width=self.window[0], height=self.window[1])
         viewer.setBackgroundColor("white")
         viewer.addModel(mol_block, "mol")
+        viewer.setStyle({'stick': {'radius': 0.15, 'colorscheme': 'grayCarbon'}})
         viewer.zoomTo()
 
         # set protein
@@ -270,7 +350,7 @@ class SAR:
 
         # set ligand
         viewer.addModel(Chem.MolToPDBBlock(mol), "mol")
-        viewer.setStyle({'stick': {'radius': 0.15, 'colorscheme': 'grayCarbon'}})
+        viewer.setStyle({'model': -1}, {'stick': {'radius': 0.15, 'colorscheme': 'grayCarbon'}})
 
         flat_indices = [idx for sublist in self.atom_difference for idx in sublist]
         # check if indices found in query mol
@@ -291,9 +371,9 @@ class SAR:
                     # add sphere
                     viewer.addSphere({
                         'center': {'x': centroid[0], 'y': centroid[1], 'z': centroid[2]},
-                        'radius': 0.5,
-                        'color': 'yellow',
-                        'opacity': 0.7
+                        'radius': 0.6,
+                        'color': 'gold',
+                        'opacity': 1.0
                     })
                     # tag aromatic atoms
                     for idx in ring: aromatic_atom_indices.add(idx)
@@ -304,19 +384,19 @@ class SAR:
             symbol = atom.GetSymbol()
 
             # tag donor/acceptor
-            is_donor = symbol in ['N', 'O', 'S'] and atom.GetTotalNumHs() > 0
-            is_acceptor = symbol in ['N', 'O'] and atom.GetFormalCharge() <= 0
+            donor = symbol in ['N', 'O', 'S'] and atom.GetTotalNumHs() > 0
+            acceptor = symbol in ['N', 'O'] and atom.GetFormalCharge() <= 0
             # use if halogens are listed as acceptors
-            # is_acceptor = symbol in ['N', 'O', 'F', 'Cl', 'Br', 'I'] and atom.GetFormalCharge() <= 0
+            # acceptor = symbol in ['N', 'O', 'F', 'Cl', 'Br', 'I'] and atom.GetFormalCharge() <= 0
 
             # set color var
             color = None
             # donor/acceptor colorscheme
-            if is_donor and is_acceptor:
+            if donor and acceptor:
                 color = 'magenta'
-            elif is_donor:
+            elif donor:
                 color = 'blue'
-            elif is_acceptor:
+            elif acceptor:
                 color = 'red'
 
             # hydrophobic colorscheme
@@ -330,7 +410,7 @@ class SAR:
 
             # apply style
             if color:
-                viewer.addStyle({'index': idx}, {
+                viewer.addStyle({'model': -1, 'index': idx}, {
                     'sphere': {
                         'color': color,
                         'opacity': 0.7,
