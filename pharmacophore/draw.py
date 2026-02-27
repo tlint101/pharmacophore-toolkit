@@ -1,5 +1,5 @@
 """
-Script to draw pharmacophore in 2D figure
+Script to draw pharmacophore
 """
 
 import os
@@ -276,7 +276,7 @@ class View:
     def view(self, mol: Union[list[Chem.Mol], Chem.Mol], pharmacophore: list = None, color: dict = None,
              labels: bool = True, window: tuple = (500, 500)):
         """
-        Generate an interactive py3d mol image of the molecule and its pharmacophores. Method only works when used in
+        Generate an interactive py3Dmol image of the molecule and its pharmacophores. Method only works when used in
         Jupyter notebooks. Must include a list of molecules and a list of pharmacophores generated using
         Pharmacophore.calc_pharm().
         :param mol: Union[list[Chem.Mol], Chem.Mol]
@@ -287,7 +287,7 @@ class View:
             A dictionary containing the following: {pharmacophore:color}. The color name can be in hex code or color
             name. If None given, will use default colors.
         :param labels: bool
-            Whether to generate labels overlayed on the pharmacophore sphres.
+            Whether to generate labels overlay on the pharmacophore spheres.
         :param window: tuple
             Set the window size of the py3dmol figure.
         :return:
