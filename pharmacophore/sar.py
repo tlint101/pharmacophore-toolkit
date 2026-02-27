@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import py3Dmol
 from rdkit import Chem, DataStructs
-from rdkit.Chem import Draw, rdFMCS, rdDepictor, AllChem
+from rdkit.Chem import Draw, rdFMCS, AllChem
 from rdkit.Chem.Crippen import MolLogP
 import matplotlib.colors as mcolors
 from typing import Optional, Union
