@@ -8,7 +8,6 @@ import matplotlib.colors as mcolors
 from typing import Optional, Union
 
 
-# todo document methods
 class SAR:
     def __init__(self, data: pd.DataFrame, smi_col: str = "smiles", act_col: str = "activity", units: str = "nM"):
         self.atom_difference = None
@@ -32,8 +31,11 @@ class SAR:
     # todo add different fp types?
     def calc_LiPE(self, smi_col: Optional[list] = None, act_col: Optional[list] = None):
         """
-        LipE = pIC50 - LogP
-        https://en.wikipedia.org/wiki/Lipophilic_efficiency
+        Calculate the Lipophilic Efficiency (LiPE) for a query molecule. The LiPE is calculated as LipE = pIC50 - LogP
+        :param smi_col: Optional[list]
+            Designate the smiles cols.
+        :param act_col: Optional[list]
+            Designate the activities cols.
         :return:
         """
         global smi_list
@@ -67,6 +69,12 @@ class SAR:
         return self.data
 
     def get_sali(self, smi_col: Optional[list] = None):
+        """
+        Calculate the Structure-Activity Landscape Index (SALI) between a pair of molecules.
+        :param smi_col: Optional[list]
+            Designate the smiles cols.
+        :return:
+        """
         if smi_col is None:
             smi_col = self.smi_col
 
@@ -114,14 +122,19 @@ class SAR:
         :param smi_col: str
             Column name containing SMILES strings.
         :param ncols: int
+            Set the number of columns for drawn molecules.
         :param subsize: tuple
+            Set the drawing size for each molecule.
         :param legend: list
+            Set the legend for each moleucle in the grid.
         :param highlight_color: str
             Set the color style of the highlights. Names must be found in Matplotlib.
         :param radius: int
             Set the highlight radius.
         :param SVG: bool
+            Whether to output image in SVG format. Defaults to False, giving a .png image.
         :param savepath: str
+            Set the savepath for the image.
         :return:
         """
         if smi_col is None:
