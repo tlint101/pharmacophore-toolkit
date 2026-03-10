@@ -1,4 +1,4 @@
-name: Pharmacophore-Toolsets Test
+name: Pharmacophore-Toolkit Test
 on:
   push:
     branches: [ "main", "master" ]
