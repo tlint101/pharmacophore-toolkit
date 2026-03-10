@@ -277,6 +277,7 @@ class Pharmacophore:
                     f"pseudoatom {feature}_{count}, pos=[{pos_x}, {pos_y}, {pos_z}]\n"
                 )
 
+            #todo add mol name in front of pharmacophre
             # set color and sphere size
             f.write("\n")
             if type == "sphere":

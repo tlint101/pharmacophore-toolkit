@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import py3Dmol
 from rdkit import Chem, DataStructs
-from rdkit.Chem import Draw, rdFMCS, AllChem
+from rdkit.Chem import Draw, rdFMCS, AllChem, rdFingerprintGenerator, MACCSkeys
 from rdkit.Chem.Crippen import MolLogP
 import matplotlib.colors as mcolors
 from typing import Optional, Union
@@ -68,7 +68,7 @@ class SAR:
 
         return self.data
 
-    def get_sali(self, smi_col: Optional[list] = None):
+    def get_sali(self, smi_col: Optional[list] = None, bits: int = 1024, radius: int = 2, type: str = 'morgan'):
         """
         Calculate the Structure-Activity Landscape Index (SALI) between a pair of molecules.
         :param smi_col: Optional[list]
@@ -82,9 +82,14 @@ class SAR:
         smi_list = data[smi_col].tolist()
         pIC50_list = data['pIC50'].tolist()
 
+        # todo fix
+        if type == 'morgan':
+            print(Warning("Currently only RDKFingerprint will be used by default"))
+
         # add fp col
         mol_list = [Chem.MolFromSmiles(x) for x in smi_list]
-        data['fp'] = [Chem.RDKFingerprint(x) for x in mol_list]
+        data['fp'] = [Chem.RDKFingerprint(x) for x in
+                      mol_list]  # todo a function to use different types of fingerprints
         fp_list = data['fp'].tolist()
 
         sal_list = []
@@ -112,7 +117,7 @@ class SAR:
 
         return sal_df
 
-    def highlight_cliffs(self, smi_col: Optional[list] = None, ncols: int = 2, subsize: tuple = (400, 400),
+    def highlight_cliffs(self, smi_list: Optional[list] = None, ncols: int = 2, subsize: tuple = (400, 400),
                          legend: list = None, highlight_color: str = None, radius: int = 0.3, SVG: bool = False,
                          savepath: str = None):
         """
@@ -137,11 +142,10 @@ class SAR:
             Set the savepath for the image.
         :return:
         """
-        if smi_col is None:
-            smi_col = self.smi_col
-
         # extract smi and convert to RDKit object
-        smi_list = self.data[smi_col].tolist()
+        if smi_list is None:
+            smi_col = self.smi_col
+            smi_list = self.data[smi_col].tolist()
         mol_list = [Chem.MolFromSmiles(smi) for smi in smi_list]
 
         # checks
@@ -456,6 +460,38 @@ def _calculate_pic50(activity: Optional[list], units: str = "nM"):
         pic50.append(converted_ic)
 
     return pic50
+
+
+# todo add additional fingerprints
+def _calculate_fingerprint(mol, fp_type='morgan', radius=2, fpSize=1024):
+    """
+    Calculates molecular fingerprints for various RDKit algorithms.
+
+    Parameters:
+        mol: RDKit Mol object
+        fp_type: Type of fingerprint ('morgan', 'rdkit', 'atompair', 'torsion', 'maccs')
+        radius: Radius for Morgan (ignored by others)
+        fpSize: Size of the bit vector (ignored by MACCS)
+    """
+    # 1. Map string names to their respective Generator factory functions
+    generators = {
+        'morgan': lambda: rdFingerprintGenerator.GetMorganGenerator(radius=radius, fpSize=fpSize),
+        'rdkit': lambda: rdFingerprintGenerator.GetRDKitFPGenerator(fpSize=fpSize),
+        'atompair': lambda: rdFingerprintGenerator.GetAtomPairGenerator(fpSize=fpSize),
+        'torsion': lambda: rdFingerprintGenerator.GetTopologicalTorsionGenerator(fpSize=fpSize),
+    }
+
+    # 2. Handle MACCS Keys separately (they have a fixed size of 167 bits)
+    if fp_type.lower() == 'maccs':
+        return MACCSkeys.GenMACCSKeys(mol)
+
+    # 3. Get the generator and produce the fingerprint
+    if fp_type.lower() in generators:
+        gen = generators[fp_type.lower()]()
+        return gen.GetFingerprint(mol)
+    else:
+        raise ValueError(f"Unknown fingerprint type: {fp_type}. "
+                         f"Choose from {list(generators.keys()) + ['maccs']}")
 
 
 def _color_to_rgb(color_input):
