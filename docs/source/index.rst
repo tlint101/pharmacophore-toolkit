@@ -13,7 +13,7 @@ Welcome to Pharmacophore-Toolkit Documentation!
 
 .. toctree::
    :caption: Tutorials
-   :maxdepth: 2
+   :maxdepth: 1
 
    tutorials/tutorials
 
@@ -28,3 +28,4 @@ Indices and tables
 * :ref:`genindex`
 * :ref:`modindex`
 * :ref:`search`
+``_

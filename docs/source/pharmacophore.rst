@@ -27,3 +27,11 @@ pharmacophore.pharmacophore
    :members:
    :show-inheritance:
    :undoc-members:
+
+pharmacophore.sar
+-------------------
+
+.. automodule:: pharmacophore.sar
+   :members:
+   :show-inheritance:
+   :undoc-members:
