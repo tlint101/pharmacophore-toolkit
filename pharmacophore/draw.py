@@ -289,17 +289,18 @@ class View:
             self.mol = mol
             self.pharmacophore = pharmacophore
 
-    def view(self, mol: Union[list[Chem.Mol], Chem.Mol], pharmacophore: list = None, color: dict = None,
-             labels: bool = True, window: tuple = (500, 500), prefix: str = "pharmacophore"):
+    def view(self, mol: Optional[Union[list[Chem.Mol], Chem.Mol]] = None, pharmacophore: Optional[list] = None,
+             color: Optional[dict] = None, labels: bool = True, window: tuple = (500, 500),
+             prefix: str = "pharmacophore"):
         """
         Generate an interactive py3Dmol image in either Jupyter or Marimo Notebook of the molecule and its
         pharmacophores. Must include a list of molecules and a list of pharmacophores generated using
         Pharmacophore.calc_pharm().
-        :param mol: Union[list[Chem.Mol], Chem.Mol]
+        :param mol: Optional[Union[list[Chem.Mol], Chem.Mol]]
             A molecule in ROMol format. Can be a single molecule or a list of molecules.
-        :param pharmacophore: list
+        :param pharmacophore: Optional[list]
             A list containing a list of pharmacophore data generated from Pharmacophore.calc_pharm().
-        :param color: dict
+        :param color: Optional[dict]
             A dictionary containing the following: {pharmacophore:color}. The color name can be in hex code or color
             name. If None given, will use default colors.
         :param labels: bool
@@ -311,9 +312,9 @@ class View:
         :return:
         """
         if self.type == "jupyter":
-            return self._jupyter(color, labels, mol, pharmacophore, window)
+            return self._jupyter(mol, labels, color, pharmacophore, window)
         elif self.type == "marimo":
-            return self._marimo(color, labels, mol, pharmacophore, window, prefix)
+            return self._marimo(mol, labels, color, pharmacophore, window, prefix)
         else:
             raise ValueError("Only 'jupyter' or 'marimo' accepted!")
 
@@ -400,7 +401,6 @@ class View:
         Output Marimo interactive window.
         """
         import marimo as mo
-        # ---- same argument handling as view() -------------------------------
         if not isinstance(mol, list):
             mol = [mol]
         if pharmacophore is None:
@@ -411,13 +411,13 @@ class View:
         elif isinstance(color, dict):
             color = {key: color_convert(value) for key, value in color.items()}
 
-        # a flat feature list is shared across all molecules (matches _render)
+        # flatten feature list
         if pharmacophore and pharmacophore[0] and isinstance(pharmacophore[0][0], str):
             pharma = [pharmacophore] * len(mol)
         else:
             pharma = pharmacophore
 
-        # ---- serialise molecules + features for the browser -----------------
+        # serialize molecule data
         data = []
         for i, (m, feats) in enumerate(zip(mol, pharma)):
             if m.GetNumConformers() == 0:
@@ -523,7 +523,8 @@ class View:
 
     @staticmethod
     def _css_color(c):
-        """Convert color for css.
+        """
+        Convert color for css.
         Accept 'royalblue', '#4169e1' or an (r, g, b) float tuple from color_convert.
         """
         if isinstance(c, (tuple, list)):
