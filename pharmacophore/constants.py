@@ -4,6 +4,7 @@ Hold constant values
 import os
 import matplotlib.colors as mcolors
 from rdkit.Chem import AllChem, RDConfig
+from typing import Optional
 
 feature_factory = AllChem.BuildFeatureFactory(os.path.join(RDConfig.RDDataDir, 'BaseFeatures.fdef'))
 
@@ -54,10 +55,10 @@ INTERACTIVE_COLORS = {
 }
 
 
-def color_convert(color: str = None):
+def color_convert(color: Optional[str] = None):
     """
-    helper funciton to convert color to rgb.
-    :param color: str
+    helper function to convert color to rgb.
+    :param color: Optional[str]
         Color to convert to rgb. Can be hex or color name.
     :return:
     """

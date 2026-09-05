@@ -83,6 +83,7 @@ class SAR:
         pIC50_list = data['pIC50'].tolist()
 
         # todo fix
+
         if type == 'morgan':
             print(Warning("Currently only RDKFingerprint will be used by default"))
 
@@ -118,8 +119,8 @@ class SAR:
         return sal_df
 
     def highlight_cliffs(self, smi_list: Optional[list] = None, ncols: int = 2, subsize: tuple = (400, 400),
-                         legend: list = None, highlight_color: str = None, radius: int = 0.3, SVG: bool = False,
-                         savepath: str = None):
+                         legend: Optional[list] = None, highlight_color: Optional[str] = None, radius: int = 0.3,
+                         SVG: bool = False, savepath: Optional[str] = None):
         """
         Draw and highlight differing structures in 2D. For each molecule, the Maximum Common Substructure (MCS) is
         identified. Only differing functional groups will be highlighted. Information is pulled from the pd.DataFrame
@@ -130,15 +131,15 @@ class SAR:
             Set the number of columns for drawn molecules.
         :param subsize: tuple
             Set the drawing size for each molecule.
-        :param legend: list
+        :param legend: Optional[list]
             Set the legend for each moleucle in the grid.
-        :param highlight_color: str
+        :param highlight_color: Optional[str]
             Set the color style of the highlights. Names must be found in Matplotlib.
         :param radius: int
             Set the highlight radius.
         :param SVG: bool
             Whether to output image in SVG format. Defaults to False, giving a .png image.
-        :param savepath: str
+        :param savepath: Optional[str]
             Set the savepath for the image.
         :return:
         """
@@ -222,12 +223,12 @@ class SAR:
 
         return img
 
-    def output_cliffs(self, mols: Chem.Mol = None, savepath: str = None):
+    def output_cliffs(self, mols: Optional[Chem.Mol] = None, savepath: Optional[str] = None):
         """
         Output the activity cliffs for molecule as .pml file for rendering in PyMOL.
-        :param mols: Chem.Mol
+        :param mols: Optional[Chem.Mol]
             Input the RDKit molecule object to generate the activity cliffs.
-        :param savepath: str
+        :param savepath: Optional[str]
             Savepath for the .pml file.
         :return:
         """
@@ -303,7 +304,7 @@ class SAR:
 
             f.write("zoom all\n")
 
-    def view_cliffs(self, mols: Union[Chem.Mol, list[Chem.Mol]] = None, protein_path: str = None,
+    def view_cliffs(self, mols: Union[Chem.Mol, list[Chem.Mol]] = None, protein_path: Optional[str] = None,
                     window: tuple = (500, 500)):
         """
         View the activity cliffs of molecules in py3Dmol. Only atoms not found using Maximum Common Substructure (MCS)
@@ -311,7 +312,7 @@ class SAR:
         :param mols: Union[Chem.Mol, list[Chem.Mol]]
             RDKit molecule object for rendering. Should be the same as the smiles given as the pd.DataFrame input when
             initializing SAR.
-        :param protein_path: str
+        :param protein_path: Optional[str]
             Filepath to the target protein structure.
         :param window: tuple
             Set the windows size of the visualization window.
@@ -435,8 +436,7 @@ class SAR:
                     }
                 })
 
-        viewer.zoomTo()
-        return viewer.show()
+        viewer.show()
 
 
 def _calculate_pic50(activity: Optional[list], units: str = "nM"):
