@@ -5,10 +5,12 @@ Script to draw pharmacophore
 import os
 import io
 import py3Dmol
+import json
+import warnings
 import matplotlib.image as img
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
-from typing import Optional, Union
+from typing import Optional, Union, Any
 from PIL import Image
 from collections import defaultdict
 from cairosvg import svg2png
@@ -16,7 +18,7 @@ from IPython.display import SVG
 from pharmacophore.constants import FEATURE_COLORS, INTERACTIVE_COLORS, color_convert
 from pharmacophore import Pharmacophore
 from rdkit import Chem
-from rdkit.Chem import rdDepictor, AllChem
+from rdkit.Chem import rdDepictor, AllChem, Mol
 from rdkit.Chem.Draw import rdMolDraw2D, SimilarityMaps
 from rdkit.Chem.Draw.MolDrawing import DrawingOptions
 
@@ -180,7 +182,7 @@ class Draw:
             plt.savefig(f"{savepath}", dpi=300)
 
     # support function to draw molecule with atom index
-    def atom_number(self, mol: Chem.Mol = None, label: str = "atomNote", size: tuple = (300, 300)):
+    def atom_number(self, mol: Optional[Chem.Mol] = None, label: str = "atomNote", size: tuple = (300, 300)):
         """
         Draw query molecule with labeled RDKit atom indices.
         :param mol: Chem.Mol
@@ -269,15 +271,29 @@ class Draw:
 
 class View:
     def __init__(self, mol: Optional[Union[Chem.Mol, list[Chem.Mol]]] = None,
-                 pharmacophore: Optional[Union[str, dict]] = 'default'):
-        self.mol = mol
-        self.pharmacophore = pharmacophore
+                 pharmacophore: Optional[Union[str, dict]] = 'default', type: str = "jupyter"):
+        """
+        Shared functions for the View() class.
+        :param mol: Optional[Union[Chem.Mol, list[Chem.Mol]]]
+            A set of ROMols in a list to render.
+        :param pharmacophore: Optional[Union[str, dict]]
+            A set of pharmacophores for rendering.
+        :param type: str
+            Set the output for Jupyter or Marimo notebooks. Defaults to Jupyter.
+        """
+        # check type
+        if type.lower() not in ("jupyter", "marimo"):
+            raise ValueError("Only 'jupyter' or 'marimo' accepted!")
+        else:
+            self.type = type
+            self.mol = mol
+            self.pharmacophore = pharmacophore
 
     def view(self, mol: Union[list[Chem.Mol], Chem.Mol], pharmacophore: list = None, color: dict = None,
-             labels: bool = True, window: tuple = (500, 500)):
+             labels: bool = True, window: tuple = (500, 500), prefix: str = "pharmacophore"):
         """
-        Generate an interactive py3Dmol image of the molecule and its pharmacophores. Method only works when used in
-        Jupyter notebooks. Must include a list of molecules and a list of pharmacophores generated using
+        Generate an interactive py3Dmol image in either Jupyter or Marimo Notebook of the molecule and its
+        pharmacophores. Must include a list of molecules and a list of pharmacophores generated using
         Pharmacophore.calc_pharm().
         :param mol: Union[list[Chem.Mol], Chem.Mol]
             A molecule in ROMol format. Can be a single molecule or a list of molecules.
@@ -290,8 +306,19 @@ class View:
             Whether to generate labels overlay on the pharmacophore spheres.
         :param window: tuple
             Set the window size of the py3dmol figure.
+        :param prefix: str
+            Set the prefix for the saved image. Only works for Marimo notebooks.
         :return:
         """
+        if self.type == "jupyter":
+            return self._jupyter(color, labels, mol, pharmacophore, window)
+        elif self.type == "marimo":
+            return self._marimo(color, labels, mol, pharmacophore, window, prefix)
+        else:
+            raise ValueError("Only 'jupyter' or 'marimo' accepted!")
+
+    def _jupyter(self, mol: Optional[list[Mol]], labels: bool, color: Optional[dict[Any, Any]],
+                 pharmacophore: Optional[list[Any]], window: tuple):
         # instantiate variables
         if pharmacophore is None:
             pharmacophore = self.pharmacophore
@@ -366,6 +393,142 @@ class View:
                 })
 
         viewer.show()
+
+    def _marimo(self, mol: Optional[list[Mol]], labels: bool, color: Optional[dict[Any, Any]],
+                pharmacophore: Optional[list[Any]], window: tuple, prefix):
+        """
+        Output Marimo interactive window.
+        """
+        import marimo as mo
+        # ---- same argument handling as view() -------------------------------
+        if not isinstance(mol, list):
+            mol = [mol]
+        if pharmacophore is None:
+            calc = Pharmacophore(features=self.pharmacophore)
+            pharmacophore = [calc.calc_pharm(mol=m) for m in mol]
+        if color is None:
+            color = INTERACTIVE_COLORS
+        elif isinstance(color, dict):
+            color = {key: color_convert(value) for key, value in color.items()}
+
+        # a flat feature list is shared across all molecules (matches _render)
+        if pharmacophore and pharmacophore[0] and isinstance(pharmacophore[0][0], str):
+            pharma = [pharmacophore] * len(mol)
+        else:
+            pharma = pharmacophore
+
+        # ---- serialise molecules + features for the browser -----------------
+        data = []
+        for i, (m, feats) in enumerate(zip(mol, pharma)):
+            if m.GetNumConformers() == 0:
+                warnings.warn(
+                    f"Molecule {i + 1} has no conformer. calc_pharm() cannot compute "
+                    f"feature centroids without 3D coordinates, so no spheres will be "
+                    f"drawn. Embed the molecule first (AllChem.EmbedMolecule).",
+                    stacklevel=2,
+                )
+            elif not feats:
+                warnings.warn(f"Molecule {i + 1} has no pharmacophore features.", stacklevel=2)
+
+            data.append({
+                "name": f"Molecule {i + 1}",
+                "mol": Chem.MolToMolBlock(m),
+                "feats": [{"label": f[0],
+                           "x": float(f[2]), "y": float(f[3]), "z": float(f[4]),
+                           "color": self._css_color(color.get(f[0]))}
+                          for f in feats],
+            })
+
+        width, height = window
+
+        html = f"""
+        <script src="https://3Dmol.org/build/3Dmol-min.js"></script>
+        <div style="font:13px sans-serif;display:flex;gap:8px;align-items:center;margin-bottom:8px">
+          <select id="sel"></select>
+          <select id="scale" title="Export resolution">
+            <option value="1">1x</option><option value="2" selected>2x</option><option value="4">4x</option>
+          </select>
+          <label><input type="checkbox" id="transparent"> transparent</label>
+          <span style="display:inline-flex;gap:2px">
+            <button data-pan="-20,0">&larr;</button><button data-pan="20,0">&rarr;</button>
+            <button data-pan="0,-20">&uarr;</button><button data-pan="0,20">&darr;</button>
+            <button id="recenter" title="Recenter">&#8982;</button>
+          </span>
+          <button id="shot" title="Save PNG" style="display:flex;align-items:center;justify-content:center;
+                  width:28px;height:28px;padding:0;cursor:pointer;border:1px solid #ccc;border-radius:4px;background:#fff">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+              <polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
+            </svg>
+          </button>
+        </div>
+        <div id="viewer" style="width:{width}px;height:{height}px;position:relative"></div>
+        <script>
+        const DATA = {json.dumps(data)};
+        const LABELS = {json.dumps(bool(labels))};
+        const box = document.getElementById("viewer");
+        const sel = document.getElementById("sel");
+        DATA.forEach((d, i) => sel.add(new Option(d.name, i)));
+        const viewer = $3Dmol.createViewer(box, {{backgroundColor: "white"}});
+
+        function render(i) {{
+          const d = DATA[i];
+          viewer.removeAllModels(); viewer.removeAllShapes(); viewer.removeAllLabels();
+          viewer.addModel(d.mol, "mol");
+          viewer.setStyle({{}}, {{stick: {{}}}});
+          d.feats.forEach(f => {{
+            const pos = {{x: f.x, y: f.y, z: f.z}};
+            viewer.addSphere({{center: pos, radius: 0.5, color: f.color, opacity: 0.9}});
+            if (LABELS) {{
+              viewer.addLabel(f.label, {{position: pos, fontSize: 12, showBackground: true,
+                                         backgroundColor: f.color, fontColor: "white"}});
+            }}
+          }});
+          viewer.zoomTo(); viewer.render();
+        }}
+
+        function snapshot() {{
+          const scale = +document.getElementById("scale").value;
+          const transparent = document.getElementById("transparent").checked;
+          const w = box.style.width, h = box.style.height;
+          if (transparent) viewer.setBackgroundColor(0xffffff, 0);
+          if (scale !== 1) {{
+            box.style.width = parseInt(w) * scale + "px";
+            box.style.height = parseInt(h) * scale + "px";
+            viewer.resize();
+          }}
+          viewer.render();
+          const uri = viewer.pngURI();
+          if (transparent) viewer.setBackgroundColor("white");
+          if (scale !== 1) {{ box.style.width = w; box.style.height = h; viewer.resize(); }}
+          viewer.render();
+          const a = document.createElement("a");
+          a.href = uri;
+          a.download = "{prefix}_" + DATA[+sel.value].name.replace(/\\s+/g, "_") + ".png";
+          document.body.appendChild(a); a.click(); a.remove();
+        }}
+
+        document.querySelectorAll("[data-pan]").forEach(b => b.onclick = () => {{
+          const [dx, dy] = b.dataset.pan.split(",").map(Number);
+          viewer.translate(dx, dy, 200);
+        }});
+        document.getElementById("recenter").onclick = () => viewer.zoomTo();
+        sel.onchange = e => render(+e.target.value);
+        document.getElementById("shot").onclick = snapshot;
+        render(0);
+        </script>"""
+
+        return mo.iframe(html, height=f"{height + 110}px")
+
+    @staticmethod
+    def _css_color(c):
+        """Convert color for css.
+        Accept 'royalblue', '#4169e1' or an (r, g, b) float tuple from color_convert.
+        """
+        if isinstance(c, (tuple, list)):
+            return "#%02x%02x%02x" % tuple(int(round(255 * v)) for v in c[:3])
+        return c
 
 
 if __name__ == "__main__":
