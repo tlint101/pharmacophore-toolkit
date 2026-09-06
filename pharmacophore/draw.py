@@ -400,7 +400,10 @@ class View:
         """
         Output Marimo interactive window.
         """
-        import marimo as mo
+        try:
+            import marimo as mo
+        except Exception as e:
+            return e
         if not isinstance(mol, list):
             mol = [mol]
         if pharmacophore is None:
