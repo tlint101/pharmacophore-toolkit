@@ -66,9 +66,9 @@ molecules can be generated in 3D using two methods:
 <figure>
     <img src="img/3d_example_py3dmol.png" width="400">
     <figcaption>
-    Images rendered in Jupyter Notebook using py3Dmol using a screenshot. Pharmacophore features for each molecule is 
-    highlighted. Blue spheres represent Hydrogen Bond Donors, gold spheres for Aromatic rings, and green for 
-    Hydrophobes. 
+    Images rendered in Jupyter Notebook using py3Dmol using a screenshot. The 3D models can also be rendered in Marimo
+    notebooks. Pharmacophore features for each molecule is highlighted. Blue spheres represent Hydrogen Bond Donors, 
+    gold spheres for Aromatic rings, and green for Hydrophobes. 
     </figcaption>
 </figure>
 
