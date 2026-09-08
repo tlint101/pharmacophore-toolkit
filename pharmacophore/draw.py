@@ -190,6 +190,7 @@ class Draw:
 
         # Set aspect ratio to equal
         ax.set_aspect("equal", adjustable="box")
+        plt.show()
         if savepath:
             plt.savefig(f"{savepath}", dpi=300)
 
