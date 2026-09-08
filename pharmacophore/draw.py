@@ -7,6 +7,7 @@ import io
 import py3Dmol
 import json
 import warnings
+import statistics
 import matplotlib.image as img
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
@@ -57,6 +58,20 @@ class Draw:
         except:
             raise ValueError('Unknown features! Only "default" or "rdkit", or custom features as dict are supported!')
 
+        # work on a copy. Compute2DCoords replaces the conformer and the atomLabel props below are
+        # permanent, so operating on the input would strip the caller's molecule of its 3D
+        # coordinates and leave labels behind on it
+        mol = Chem.Mol(mol)
+
+        # flatten molecule into 2D
+        # NOTE: do not set rdDepictor.SetPreferCoordGen() here. It is a process-wide RDKit setting,
+        # so toggling it inside this method changes the depiction of every later call in the session
+        rdDepictor.Compute2DCoords(mol)
+
+        # highlight_rads is in molecule units, so scale it to the depiction to keep the circles the
+        # same size relative to the molecule no matter which depictor produced the coordinates
+        highlight_radius = 0.33 * _median_bond_length(mol)
+
         # dictionaries to highlight atoms and highlight radius
         atom_highlights = defaultdict(list)
         highlight_rads = {}
@@ -78,11 +93,8 @@ class Draw:
                 # print(color)
                 for atom_id in feature[1]:
                     atom_highlights[atom_id].append(color)
-                    highlight_rads[atom_id] = 0.5
+                    highlight_rads[atom_id] = highlight_radius
 
-        # flatten molecule into 2D
-        rdDepictor.Compute2DCoords(mol)
-        rdDepictor.SetPreferCoordGen(True)
         drawer = rdMolDraw2D.MolDraw2DSVG(800, 800)
 
         # set drawing options
@@ -438,7 +450,7 @@ class View:
                 "mol": Chem.MolToMolBlock(m),
                 "feats": [{"label": f[0],
                            "x": float(f[2]), "y": float(f[3]), "z": float(f[4]),
-                           "color": self._css_color(color.get(f[0]))}
+                           "color": _css_color(color.get(f[0]))}
                           for f in feats],
             })
 
@@ -524,15 +536,37 @@ class View:
 
         return mo.iframe(html, height=f"{height + 110}px")
 
-    @staticmethod
-    def _css_color(c):
-        """
-        Convert color for css.
-        Accept 'royalblue', '#4169e1' or an (r, g, b) float tuple from color_convert.
-        """
-        if isinstance(c, (tuple, list)):
-            return "#%02x%02x%02x" % tuple(int(round(255 * v)) for v in c[:3])
-        return c
+
+def _css_color(c):
+    """
+    Support function for _marimo. Converts color for css.  Accept 'royalblue', '#4169e1' or an (r, g, b) float tuple
+    from color_convert.
+    """
+    if isinstance(c, (tuple, list)):
+        return "#%02x%02x%02x" % tuple(int(round(255 * v)) for v in c[:3])
+    return c
+
+
+def _median_bond_length(mol: Chem.Mol):
+    """
+    Support function for the draw_pharm(). This measures the median bond length of a 2D depiction and scales the bonds
+    for consistency. This allows for draw_pharm() to be used in a loop without issues to highlight radius sizes.
+    :param mol: Chem.Mol
+        A molecule in ROMol format, with 2D coordinates already computed.
+    :return: float
+        Median bond length in molecule units. Falls back to 1.5 for molecules without bonds.
+    """
+    conf = mol.GetConformer()
+    lengths = []
+    for bond in mol.GetBonds():
+        begin = conf.GetAtomPosition(bond.GetBeginAtomIdx())
+        end = conf.GetAtomPosition(bond.GetEndAtomIdx())
+        lengths.append(((begin.x - end.x) ** 2 + (begin.y - end.y) ** 2) ** 0.5)
+
+    if not lengths:
+        return 1.5
+
+    return statistics.median(lengths)
 
 
 if __name__ == "__main__":
