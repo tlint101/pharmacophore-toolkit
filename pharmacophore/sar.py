@@ -1,3 +1,4 @@
+import json
 import pandas as pd
 import numpy as np
 import py3Dmol
@@ -9,7 +10,26 @@ from typing import Optional, Union
 
 
 class SAR:
-    def __init__(self, data: pd.DataFrame, smi_col: str = "smiles", act_col: str = "activity", units: str = "nM"):
+    def __init__(self, data: pd.DataFrame, smi_col: str = "smiles", act_col: str = "activity", units: str = "nM",
+                 type: str = "jupyter"):
+        """
+        Shared functions for the SAR() class.
+        :param data: pd.DataFrame
+            A DataFrame containing the SMILES and activity of each molecule.
+        :param smi_col: str
+            Column name containing SMILES strings.
+        :param act_col: str
+            Column name containing the activity values.
+        :param units: str
+            Units of the activity values. Accepts 'nM', 'uM' or 'mM'.
+        :param type: str
+            Set the output for Jupyter or Marimo notebooks. Defaults to Jupyter.
+        """
+        # check type
+        if type.lower() not in ("jupyter", "marimo"):
+            raise ValueError("Only 'jupyter' or 'marimo' accepted!")
+        self.type = type.lower()
+
         self.atom_difference = None
         self.smi_col = smi_col
         self.act_col = act_col
@@ -305,10 +325,10 @@ class SAR:
             f.write("zoom all\n")
 
     def view_cliffs(self, mols: Union[Chem.Mol, list[Chem.Mol]] = None, protein_path: Optional[str] = None,
-                    window: tuple = (500, 500)):
+                    window: tuple = (500, 500), prefix: str = "cliffs"):
         """
-        View the activity cliffs of molecules in py3Dmol. Only atoms not found using Maximum Common Substructure (MCS)
-        will be highlighted.
+        View the activity cliffs of molecules in py3Dmol, in either a Jupyter or Marimo notebook. Only atoms not found
+        using Maximum Common Substructure (MCS) will be highlighted.
         :param mols: Union[Chem.Mol, list[Chem.Mol]]
             RDKit molecule object for rendering. Should be the same as the smiles given as the pd.DataFrame input when
             initializing SAR.
@@ -316,24 +336,29 @@ class SAR:
             Filepath to the target protein structure.
         :param window: tuple
             Set the windows size of the visualization window.
+        :param prefix: str
+            Set the prefix for the saved image. Only works for Marimo notebooks.
         :return:
         """
+        if mols is None:
+            raise ValueError(f"No valid RDKit molecules given!")
 
-        self.mols = mols
+        self.mols = [mols] if isinstance(mols, Chem.Mol) else mols
         self.window = window
         self.protein_path = protein_path
 
-        # dropdown menu
-        if isinstance(mols, Chem.Mol):
-            drop_options = [("Molecule 1", 0)]
-        elif mols is None:
-            raise ValueError(f"No valid RDKit molecules given!")
+        if self.type == "jupyter":
+            return self._jupyter_cliffs()
+        elif self.type == "marimo":
+            return self._marimo_cliffs(prefix)
         else:
-            drop_options = [(f"Molecule {i + 1}", i) for i in range(len(mols))]
+            raise ValueError("Only 'jupyter' or 'marimo' accepted!")
 
+    def _jupyter_cliffs(self):
+        """Output Jupyter interactive window."""
         import ipywidgets as widgets
         dropdown = widgets.Dropdown(
-            options=drop_options,
+            options=[(f"Molecule {i + 1}", i) for i in range(len(self.mols))],
             value=0,
             description="Select:",
             style={"description_width": "initial"}
@@ -341,40 +366,17 @@ class SAR:
 
         widgets.interact(self._render_cliffs, index=dropdown)
 
-    def _render_cliffs(self, index):
+    def _cliff_shapes(self, mol):
         """
-        Render molecules with fog effect on differing atoms
+        Support function for _render_cliffs and _marimo_cliffs. Computes the highlight spheres and the per-atom sphere
+        styles for the atoms of one molecule that fall outside the MCS.
         """
-        if isinstance(self.mols, Chem.Mol):
-            mol = self.mols
-        else:
-            mol = self.mols[index]
-        mol_block = Chem.MolToMolBlock(mol)
-
-        viewer = py3Dmol.view(width=self.window[0], height=self.window[1])
-        viewer.setBackgroundColor("white")
-        viewer.addModel(mol_block, "mol")
-        viewer.setStyle({'stick': {'radius': 0.15, 'colorscheme': 'grayCarbon'}})
-        viewer.zoomTo()
-
-        # set protein
-        if self.protein_path:
-            with open(self.protein_path, 'r') as f:
-                pdb_data = f.read()
-            viewer.addModel(pdb_data, "pdb")
-            # protein style
-            viewer.setStyle({'model': -1}, {'cartoon': {'color': 'lightgray', 'opacity': 0.6},
-                                            'line': {'color': 'lightgray', 'opacity': 0.3}})
-
-        # set ligand
-        viewer.addModel(Chem.MolToPDBBlock(mol), "mol")
-        viewer.setStyle({'model': -1}, {'stick': {'radius': 0.15, 'colorscheme': 'grayCarbon'}})
-
         flat_indices = [idx for sublist in self.atom_difference for idx in sublist]
         # check if indices found in query mol
         flat_indices = [idx for idx in flat_indices if idx < mol.GetNumAtoms()]
 
         # track aromatic atoms
+        spheres = []
         aromatic_atom_indices = set()
         ring_info = mol.GetRingInfo()
         for ring in ring_info.AtomRings():
@@ -387,8 +389,8 @@ class SAR:
                     centroid = np.mean(coords, axis=0)
 
                     # add sphere
-                    viewer.addSphere({
-                        'center': {'x': centroid[0], 'y': centroid[1], 'z': centroid[2]},
+                    spheres.append({
+                        'center': {'x': float(centroid[0]), 'y': float(centroid[1]), 'z': float(centroid[2])},
                         'radius': 0.6,
                         'color': 'gold',
                         'opacity': 1.0
@@ -397,6 +399,7 @@ class SAR:
                     for idx in ring: aromatic_atom_indices.add(idx)
 
         # track other atoms
+        atoms = []
         for idx in flat_indices:
             atom = mol.GetAtomWithIdx(idx)
             symbol = atom.GetSymbol()
@@ -426,17 +429,165 @@ class SAR:
                 else:
                     color = '#7f8c8d'
 
-            # apply style
+            # collect style
             if color:
-                viewer.addStyle({'model': -1, 'index': idx}, {
-                    'sphere': {
-                        'color': color,
-                        'opacity': 0.7,
-                        'radius': 0.7 if idx in aromatic_atom_indices else 1.0
-                    }
+                atoms.append({
+                    'index': idx,
+                    'color': color,
+                    'opacity': 0.7,
+                    'radius': 0.7 if idx in aromatic_atom_indices else 1.0
                 })
 
+        return spheres, atoms
+
+    def _render_cliffs(self, index):
+        """
+        Render molecules with fog effect on differing atoms
+        """
+        mol = self.mols[index]
+        mol_block = Chem.MolToMolBlock(mol)
+
+        viewer = py3Dmol.view(width=self.window[0], height=self.window[1])
+        viewer.setBackgroundColor("white")
+        viewer.addModel(mol_block, "mol")
+        viewer.setStyle({'stick': {'radius': 0.15, 'colorscheme': 'grayCarbon'}})
+        viewer.zoomTo()
+
+        # set protein
+        if self.protein_path:
+            with open(self.protein_path, 'r') as f:
+                pdb_data = f.read()
+            viewer.addModel(pdb_data, "pdb")
+            # protein style
+            viewer.setStyle({'model': -1}, {'cartoon': {'color': 'lightgray', 'opacity': 0.6},
+                                            'line': {'color': 'lightgray', 'opacity': 0.3}})
+
+        # set ligand
+        viewer.addModel(Chem.MolToPDBBlock(mol), "mol")
+        viewer.setStyle({'model': -1}, {'stick': {'radius': 0.15, 'colorscheme': 'grayCarbon'}})
+
+        spheres, atoms = self._cliff_shapes(mol)
+        for sphere in spheres:
+            viewer.addSphere(sphere)
+
+        # apply style
+        for atom in atoms:
+            viewer.addStyle({'model': -1, 'index': atom['index']}, {
+                'sphere': {'color': atom['color'], 'opacity': atom['opacity'], 'radius': atom['radius']}
+            })
+
         viewer.show()
+
+    def _marimo_cliffs(self, prefix):
+        """
+        Output Marimo interactive window.
+        """
+        try:
+            import marimo as mo
+        except Exception as e:
+            return e
+
+        # serialize molecule data
+        data = []
+        for i, mol in enumerate(self.mols):
+            spheres, atoms = self._cliff_shapes(mol)
+            data.append({
+                "name": f"Molecule {i + 1}",
+                "mol": Chem.MolToMolBlock(mol),
+                "pdb": Chem.MolToPDBBlock(mol),
+                "spheres": spheres,
+                "atoms": atoms,
+            })
+
+        protein = None
+        if self.protein_path:
+            with open(self.protein_path, 'r') as f:
+                protein = f.read()
+
+        width, height = self.window
+
+        html = f"""
+        <script src="https://3Dmol.org/build/3Dmol-min.js"></script>
+        <div style="font:13px sans-serif;display:flex;gap:8px;align-items:center;margin-bottom:8px">
+          <select id="sel"></select>
+          <select id="scale" title="Export resolution">
+            <option value="1">1x</option><option value="2" selected>2x</option><option value="4">4x</option>
+          </select>
+          <label><input type="checkbox" id="transparent"> transparent</label>
+          <span style="display:inline-flex;gap:2px">
+            <button data-pan="-20,0">&larr;</button><button data-pan="20,0">&rarr;</button>
+            <button data-pan="0,-20">&uarr;</button><button data-pan="0,20">&darr;</button>
+            <button id="recenter" title="Recenter">&#8982;</button>
+          </span>
+          <button id="shot" title="Save PNG" style="display:flex;align-items:center;justify-content:center;
+                  width:28px;height:28px;padding:0;cursor:pointer;border:1px solid #ccc;border-radius:4px;background:#fff">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+              <polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
+            </svg>
+          </button>
+        </div>
+        <div id="viewer" style="width:{width}px;height:{height}px;position:relative"></div>
+        <script>
+        const DATA = {json.dumps(data)};
+        const PROTEIN = {json.dumps(protein)};
+        const box = document.getElementById("viewer");
+        const sel = document.getElementById("sel");
+        DATA.forEach((d, i) => sel.add(new Option(d.name, i)));
+        const viewer = $3Dmol.createViewer(box, {{backgroundColor: "white"}});
+
+        function render(i) {{
+          const d = DATA[i];
+          viewer.removeAllModels(); viewer.removeAllShapes(); viewer.removeAllLabels();
+          viewer.addModel(d.mol, "mol");
+          viewer.setStyle({{stick: {{radius: 0.15, colorscheme: "grayCarbon"}}}});
+          viewer.zoomTo();
+          if (PROTEIN) {{
+            viewer.addModel(PROTEIN, "pdb");
+            viewer.setStyle({{model: -1}}, {{cartoon: {{color: "lightgray", opacity: 0.6}},
+                                            line: {{color: "lightgray", opacity: 0.3}}}});
+          }}
+          viewer.addModel(d.pdb, "mol");
+          viewer.setStyle({{model: -1}}, {{stick: {{radius: 0.15, colorscheme: "grayCarbon"}}}});
+          d.spheres.forEach(s => viewer.addSphere(s));
+          d.atoms.forEach(a => viewer.addStyle({{model: -1, index: a.index}},
+            {{sphere: {{color: a.color, opacity: a.opacity, radius: a.radius}}}}));
+          viewer.render();
+        }}
+
+        function snapshot() {{
+          const scale = +document.getElementById("scale").value;
+          const transparent = document.getElementById("transparent").checked;
+          const w = box.style.width, h = box.style.height;
+          if (transparent) viewer.setBackgroundColor(0xffffff, 0);
+          if (scale !== 1) {{
+            box.style.width = parseInt(w) * scale + "px";
+            box.style.height = parseInt(h) * scale + "px";
+            viewer.resize();
+          }}
+          viewer.render();
+          const uri = viewer.pngURI();
+          if (transparent) viewer.setBackgroundColor("white");
+          if (scale !== 1) {{ box.style.width = w; box.style.height = h; viewer.resize(); }}
+          viewer.render();
+          const a = document.createElement("a");
+          a.href = uri;
+          a.download = "{prefix}_" + DATA[+sel.value].name.replace(/\\s+/g, "_") + ".png";
+          document.body.appendChild(a); a.click(); a.remove();
+        }}
+
+        document.querySelectorAll("[data-pan]").forEach(b => b.onclick = () => {{
+          const [dx, dy] = b.dataset.pan.split(",").map(Number);
+          viewer.translate(dx, dy, 200);
+        }});
+        document.getElementById("recenter").onclick = () => viewer.zoomTo();
+        sel.onchange = e => render(+e.target.value);
+        document.getElementById("shot").onclick = snapshot;
+        render(0);
+        </script>"""
+
+        return mo.iframe(html, height=f"{height + 110}px")
 
 
 def _calculate_pic50(activity: Optional[list], units: str = "nM"):
