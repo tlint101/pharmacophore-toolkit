@@ -14,12 +14,10 @@ from matplotlib.colors import LinearSegmentedColormap
 from typing import Optional, Union, Any
 from PIL import Image
 from collections import defaultdict
-from cairosvg import svg2png
-from IPython.display import SVG
 from pharmacophore.constants import FEATURE_COLORS, INTERACTIVE_COLORS, color_convert
 from pharmacophore import Pharmacophore
 from rdkit import Chem
-from rdkit.Chem import rdDepictor, AllChem, Mol
+from rdkit.Chem import rdDepictor, AllChem, Mol, rdFingerprintGenerator
 from rdkit.Chem.Draw import rdMolDraw2D, SimilarityMaps
 from rdkit.Chem.Draw.MolDrawing import DrawingOptions
 
@@ -95,7 +93,7 @@ class Draw:
                     atom_highlights[atom_id].append(color)
                     highlight_rads[atom_id] = highlight_radius
 
-        drawer = rdMolDraw2D.MolDraw2DSVG(800, 800)
+        drawer = rdMolDraw2D.MolDraw2DCairo(800, 800)
 
         # set drawing options
         # Use black for all elements
@@ -115,15 +113,7 @@ class Draw:
             mol, "", dict(atom_highlights), {}, highlight_rads, {}
         )
         drawer.FinishDrawing()
-
-        # draw molecule and save a temporary file
-        svg = drawer.GetDrawingText().replace("svg:", "")
-        SVG(svg)
-        with open(f"pharm.svg", "w") as f:
-            f.write(svg)
-
-        # convert svg into png
-        svg2png(bytestring=svg, write_to=f"image.png")
+        png = drawer.GetDrawingText()
 
         # Set figure legend for feature and color type
         fig, (ax, picture) = plt.subplots(
@@ -133,11 +123,9 @@ class Draw:
         )
 
         # draw image and remove temporary file
-        mol_image = img.imread(f"image.png")
+        mol_image = img.imread(io.BytesIO(png), format="png")
         picture.imshow(mol_image)
         picture.axis("off")
-        os.remove(f"image.png")
-        os.remove(f"pharm.svg")
 
         # Data for the circles
         circle_radii = [0, 50, 100, 150, 200, 250]
@@ -190,9 +178,9 @@ class Draw:
 
         # Set aspect ratio to equal
         ax.set_aspect("equal", adjustable="box")
-        plt.show()
         if savepath:
             plt.savefig(f"{savepath}", dpi=300)
+        plt.show()
 
     # support function to draw molecule with atom index
     def atom_number(self, mol: Optional[Chem.Mol] = None, label: str = "atomNote", size: tuple = (300, 300)):
@@ -263,9 +251,10 @@ class Draw:
             cmap = LinearSegmentedColormap.from_list("custom_similarity_colors", cmap)
 
         d = Chem.Draw.MolDraw2DCairo(400, 400)
-        function = lambda m, i: SimilarityMaps.GetMorganFingerprint(m, i, radius=radius, fpType=fpType, nBits=nbits)
-        _, maxWeight = SimilarityMaps.GetSimilarityMapForFingerprint(refMol=refmol, probeMol=querymol,
-                                                                     fpFunction=function, draw2d=d, colorMap=cmap)
+        fpgen = rdFingerprintGenerator.GetMorganGenerator(radius=radius, fpSize=nbits)
+        _, maxWeight = SimilarityMaps.GetSimilarityMapForFingerprintGenerator(refMol=refmol, probeMol=querymol,
+                                                                              fpg=fpgen, useCounts=(fpType == "count"),
+                                                                              draw2d=d, colorMap=cmap)
 
         # finish drawing
         d.FinishDrawing()
