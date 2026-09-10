@@ -27,23 +27,10 @@ Alternatively, the environment can be created by cloning the repository and then
 conda env create -f environment.yaml
 ```
 
-> [!NOTE]
-> **Note:** The Pharmacophore-Toolkit relies on cairosvg to create images before being converted into .png format.
-> Depending on your
-> workstation/machine, the [CairoSVG](https://github.com/Kozea/CairoSVG) package will need to be installed manually.
-> Installation instructions can be found [here](https://cairosvg.org). If it is not already installed on your machine
-> globally,
-> users can try conda to install cairosvg:
-
-```
-conda install conda-forge::cairosvg
-```
-
-Conda installation solved the problem on my machine, but may differ with yours.
-
 ## Tutorials
 
-Tutorials are written as JupyterNotebooks and can be found [here](https://pharmacophore-toolkit.readthedocs.io/en/latest/tutorials/tutorials.html). The Pharmacophore-Toolkit can generate 
+Tutorials are written as Jupyter Notebooks and can be found [here](https://pharmacophore-toolkit.readthedocs.io/en/latest/tutorials/tutorials.html). The 3D drawing tools are also supported in 
+Marimo notebooks, which can be found [here](https://github.com/tlint101/pharmacophore-toolkit/tree/main/tutorials). The Pharmacophore-Toolkit can generate 
 several types of images:
 
 ## Example Images
