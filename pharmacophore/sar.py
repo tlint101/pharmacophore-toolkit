@@ -173,7 +173,7 @@ class SAR:
         if len(mol_list) == 0:
             raise ValueError("No valid molecules found from provided SMILES")
 
-            # if only one molecule, handle specially (can't find MCS)
+        # if only one molecule, handle specially (can't find MCS)
         if len(mol_list) == 1:
             print("Only one molecule provided, no MCS can be calculated.")
             img = Draw.MolsToGridImage(
@@ -240,6 +240,17 @@ class SAR:
             drawOptions=opts,
             useSVG=SVG,
         )
+
+        if savepath:
+            if SVG:
+                with open(savepath, "w") as f:
+                    f.write(img.data if hasattr(img, "data") else str(img))
+            else:
+                if hasattr(img, "save"):
+                    img.save(savepath)
+                else:
+                    with open(savepath, "wb") as f:
+                        f.write(img.data)
 
         return img
 
