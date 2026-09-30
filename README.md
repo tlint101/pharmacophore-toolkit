@@ -98,3 +98,16 @@ the [RDKit blog](https://greglandrum.github.io/rdkit-blog/posts/2020-01-03-simil
     at the <a href="https://www.rdkit.org/docs/source/rdkit.Chem.Draw.SimilarityMaps.html">RDKit documentation</a>.
     </figcaption>
 </figure>
+
+## Citation
+If you find this helpful in your work, consider a citation:
+```bibtex
+@software{lin_pharmacophore_toolkit,
+  author  = {Lin, Tony Eight},
+  title   = {Pharmacophore-Toolkit: Generate Simple Pharmacophore Models with RDKit},
+  year    = {2023},
+  version = {X.X.X},
+  url     = {https://github.com/tlint101/pharmacophore-toolkit}
+}
+```
+**NOTE:** Replace 'X.X.X' with the pharmacophore-toolkit version used. 
