@@ -1,7 +1,7 @@
 import marimo
 
 __generated_with = "0.24.0"
-app = marimo.App()
+app = marimo.App(width="full")
 
 
 @app.cell(hide_code=True)
@@ -125,7 +125,7 @@ def _(mo):
 
 @app.cell
 def _(sar):
-    sali = sar.get_sali()
+    sali = sar.get_sali(type="rdkit")
     sali
     return
 
