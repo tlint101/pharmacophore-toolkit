@@ -5,6 +5,7 @@ import py3Dmol
 from rdkit import Chem, DataStructs
 from rdkit.Chem import Draw, rdFMCS, AllChem, rdFingerprintGenerator, MACCSkeys
 from rdkit.Chem.Crippen import MolLogP
+from rdkit.Avalon import pyAvalonTools
 import matplotlib.colors as mcolors
 from typing import Optional, Union
 
@@ -93,7 +94,14 @@ class SAR:
         Calculate the Structure-Activity Landscape Index (SALI) between a pair of molecules.
         :param smi_col: Optional[list]
             Designate the smiles cols.
-        :return:
+        :param bits: int
+            Fingerprint size in bits. This param is ignored if 'maccs' is used.
+        :param radius: int
+            Param only used for 'morgan' and 'featmorgan' fingerprints.
+        :param type: str
+            Available fingerprint type: 'morgan' (default), 'featmorgan', 'rdkit', 'atompair', 'torsion', 'maccs',
+            'pattern', 'layered' or 'avalon'.
+        :return: pd.DataFrame
         """
         if smi_col is None:
             smi_col = self.smi_col
@@ -102,15 +110,9 @@ class SAR:
         smi_list = data[smi_col].tolist()
         pIC50_list = data['pIC50'].tolist()
 
-        # todo fix
-
-        if type == 'morgan':
-            print(Warning("Currently only RDKFingerprint will be used by default"))
-
         # add fp col
         mol_list = [Chem.MolFromSmiles(x) for x in smi_list]
-        data['fp'] = [Chem.RDKFingerprint(x) for x in
-                      mol_list]  # todo a function to use different types of fingerprints
+        data['fp'] = [_calculate_fingerprint(x, fp_type=type, radius=radius, fpSize=bits) for x in mol_list]
         fp_list = data['fp'].tolist()
 
         sal_list = []
@@ -624,36 +626,37 @@ def _calculate_pic50(activity: Optional[list], units: str = "nM"):
     return pic50
 
 
-# todo add additional fingerprints
 def _calculate_fingerprint(mol, fp_type='morgan', radius=2, fpSize=1024):
     """
-    Calculates molecular fingerprints for various RDKit algorithms.
-
-    Parameters:
-        mol: RDKit Mol object
-        fp_type: Type of fingerprint ('morgan', 'rdkit', 'atompair', 'torsion', 'maccs')
-        radius: Radius for Morgan (ignored by others)
-        fpSize: Size of the bit vector (ignored by MACCS)
+    Calculates a bit-vector fingerprint using one of RDKit's algorithms.
+    :param mol: Chem.Mol
+        RDKit Mol object.
+    :param fp_type: str
+        One of 'morgan' (ECFP), 'featmorgan' (FCFP), 'rdkit', 'atompair', 'torsion', 'maccs', 'pattern',
+        'layered' or 'avalon'.
+    :param radius: int
+        Only used for Morgan and FeatMorgan types.
+    :param fpSize: int
+        Size of the bit vector. Parma is ignored if 'maccs' is used.
+    :return: ExplicitBitVect
     """
-    # 1. Map string names to their respective Generator factory functions
-    generators = {
-        'morgan': lambda: rdFingerprintGenerator.GetMorganGenerator(radius=radius, fpSize=fpSize),
-        'rdkit': lambda: rdFingerprintGenerator.GetRDKitFPGenerator(fpSize=fpSize),
-        'atompair': lambda: rdFingerprintGenerator.GetAtomPairGenerator(fpSize=fpSize),
-        'torsion': lambda: rdFingerprintGenerator.GetTopologicalTorsionGenerator(fpSize=fpSize),
+    fingerprints = {
+        'morgan': lambda: rdFingerprintGenerator.GetMorganGenerator(radius=radius, fpSize=fpSize).GetFingerprint(mol),
+        'featmorgan': lambda: rdFingerprintGenerator.GetMorganGenerator(
+            radius=radius, fpSize=fpSize,
+            atomInvariantsGenerator=rdFingerprintGenerator.GetMorganFeatureAtomInvGen()).GetFingerprint(mol),
+        'rdkit': lambda: rdFingerprintGenerator.GetRDKitFPGenerator(fpSize=fpSize).GetFingerprint(mol),
+        'atompair': lambda: rdFingerprintGenerator.GetAtomPairGenerator(fpSize=fpSize).GetFingerprint(mol),
+        'torsion': lambda: rdFingerprintGenerator.GetTopologicalTorsionGenerator(fpSize=fpSize).GetFingerprint(mol),
+        'maccs': lambda: MACCSkeys.GenMACCSKeys(mol),
+        'pattern': lambda: Chem.PatternFingerprint(mol, fpSize=fpSize),
+        'layered': lambda: Chem.LayeredFingerprint(mol, fpSize=fpSize),
+        'avalon': lambda: pyAvalonTools.GetAvalonFP(mol, nBits=fpSize),
     }
 
-    # 2. Handle MACCS Keys separately (they have a fixed size of 167 bits)
-    if fp_type.lower() == 'maccs':
-        return MACCSkeys.GenMACCSKeys(mol)
-
-    # 3. Get the generator and produce the fingerprint
-    if fp_type.lower() in generators:
-        gen = generators[fp_type.lower()]()
-        return gen.GetFingerprint(mol)
-    else:
-        raise ValueError(f"Unknown fingerprint type: {fp_type}. "
-                         f"Choose from {list(generators.keys()) + ['maccs']}")
+    if fp_type.lower() not in fingerprints:
+        raise ValueError(f"Unknown fingerprint type: {fp_type}. Choose from {list(fingerprints)}")
+    return fingerprints[fp_type.lower()]()
 
 
 def _color_to_rgb(color_input):
