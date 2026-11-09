@@ -1,25 +1,29 @@
-[tool.poetry]
+[project]
 name = "pharmacophore-toolkit"
 version = "1.2.2"
 description = "A simple pharmacophore modeling toolkit"
-authors = ["Tony Eight Lin <tonyelin@tmu.edu.tw>"]
-license = "GPL-3.0-or-later"
+authors = [{ name = "Tony Eight Lin", email = "tonyelin@tmu.edu.tw" }]
+requires-python = ">=3.11"
 readme = "README.md"
-repository = "https://github.com/tlint101/pharmacophore-toolkit.git"
-packages = [{ include = "pharmacophore" }]
+license = "GPL-3.0-or-later"
+dependencies = [
+    "rdkit>=2023.3.1",
+    "pandas>=2.0.0",
+    "numpy>=2.0.0",
+    "matplotlib>=3.0",
+    "ipython>=8.0",
+    "ipywidgets>=8.0",
+    "py3Dmol>=2.4.2",
+    "tqdm",
+    "jupyter>=1.1.1,<2",
+    "ipykernel>=7.2.0,<8",
+]
 
-[tool.poetry.dependencies]
-python = ">=3.11"
-rdkit = ">=2023.3.1"
-pandas = ">=2.0.0"
-numpy = ">=2.0.0"
-matplotlib = ">=3.*"
-ipython = ">=8.0"
-ipywidgets = ">=8.0"
-py3Dmol = ">=2.4.2"
-tqdm = "*"
-jupyter = "^1.1.1"
-ipykernel = "^7.2.0"
+[project.urls]
+Repository = "https://github.com/tlint101/pharmacophore-toolkit.git"
+
+[tool.poetry]
+packages = [{ include = "pharmacophore" }]
 
 [build-system]
 requires = ["poetry-core"]
@@ -32,4 +36,5 @@ dev = [
     "sphinx-book-theme (>=1.2.0,<2.0.0)",
     "sphinx-design (>=0.7.0,<0.8.0)",
     "marimo (>=0.24.0,<0.25.0)"
+,
 ]
