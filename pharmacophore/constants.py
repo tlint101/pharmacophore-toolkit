@@ -102,6 +102,46 @@ METAL_RESIDUES = frozenset({"MG", "ZN", "MN", "FE", "CA", "CU", "CO", "NI", "NA"
 
 DEFAULT_POCKET_CUTOFF = 6.0
 
+# Default 3D interaction cutoffs (Å and degrees) for PLI.detect()
+DEFAULT_HBOND_DIST = 3.5
+DEFAULT_HBOND_ANGLE = 120.0
+DEFAULT_HBOND_HEAVY_ANGLE = 90.0
+DEFAULT_HYDROPHOBIC_DIST = 4.0
+DEFAULT_IONIC_DIST = 4.0
+DEFAULT_PI_STACKING_DIST = 5.5
+DEFAULT_CATION_PI_DIST = 5.0
+DEFAULT_CLASH_DIST = 2.2
+
+BACKBONE_ATOMS = frozenset({"N", "CA", "C", "O", "OXT"})
+
+HYDROPHOBIC_RESIDUES = frozenset({
+    "ALA", "VAL", "LEU", "ILE", "MET", "PHE", "TRP", "PRO", "TYR", "CYS",
+})
+
+PROTEIN_AROMATIC_RESIDUES = frozenset({"PHE", "TYR", "TRP", "HIS"})
+
+# Standard PDB ring atom names per aromatic residue (fallback when ring perception is partial)
+PROTEIN_AROMATIC_RING_ATOMS = {
+    "PHE": (("CG", "CD1", "CD2", "CE1", "CE2", "CZ"),),
+    "TYR": (("CG", "CD1", "CD2", "CE1", "CE2", "CZ"),),
+    "HIS": (("CG", "ND1", "CE1", "NE2", "CD2"),),
+    "TRP": (
+        ("CG", "CD1", "NE1", "CE2", "CD2"),
+        ("CD2", "CE2", "CZ2", "CH2", "CZ3", "CE3"),
+    ),
+}
+
+PROTEIN_POS_ATOMS = {
+    "LYS": frozenset({"NZ"}),
+    "ARG": frozenset({"CZ", "NE", "NH1", "NH2"}),
+}
+
+PROTEIN_NEG_ATOMS = {
+    "ASP": frozenset({"OD1", "OD2"}),
+    "GLU": frozenset({"OE1", "OE2"}),
+}
+
+
 if __name__ == "__main__":
     import doctest
 
