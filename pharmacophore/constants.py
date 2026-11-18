@@ -143,6 +143,28 @@ PROTEIN_NEG_ATOMS = {
     "GLU": frozenset({"OE1", "OE2"}),
 }
 
+PLI_COLORS = {
+    "HBond": (0.2549019607843137, 0.4117647058823529, 0.8823529411764706),          # royalblue (unified default)
+    "HBond_Donor": (0.2549019607843137, 0.4117647058823529, 0.8823529411764706),    # royalblue (when split_hbonds=True)
+    "HBond_Acceptor": (1.0, 0.27058823529411763, 0.0),                              # orangered (when split_hbonds=True)
+    "Hydrophobic": (0.1803921568627451, 0.5450980392156862, 0.3411764705882353),    # seagreen
+    "Pi_Stacking": (0.8549019607843137, 0.6470588235294118, 0.12549019607843137),   # goldenrod
+    "Cation_Pi": (0.8549019607843137, 0.6470588235294118, 0.12549019607843137),     # goldenrod
+    "Ionic": (0.7294117647058823, 0.3333333333333333, 0.8274509803921568),          # mediumorchid
+    "Clash": (0.8627450980392157, 0.0784313725490196, 0.23529411764705882),         # crimson
+}
+
+PML_COLORS = {
+    "HBond": (0.0, 1.0, 0.0),                                                          # PyMOL native green
+    "HBond_Donor": (0.0, 1.0, 0.0),                                                    # PyMOL native green
+    "HBond_Acceptor": (1.0, 0.27058823529411763, 0.0),                                # orangered (when split_hbonds=True)
+    "Hydrophobic": (0.1803921568627451, 0.5450980392156862, 0.3411764705882353),      # seagreen
+    "Pi_Stacking": (0.8549019607843137, 0.6470588235294118, 0.12549019607843137),     # goldenrod
+    "Cation_Pi": (0.8549019607843137, 0.6470588235294118, 0.12549019607843137),       # goldenrod
+    "Ionic": (0.7294117647058823, 0.3333333333333333, 0.8274509803921568),            # mediumorchid
+    "Clash": (0.8627450980392157, 0.0784313725490196, 0.23529411764705882),           # crimson
+}
+
 
 if __name__ == "__main__":
     import doctest
