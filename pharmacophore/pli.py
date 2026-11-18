@@ -12,11 +12,46 @@ from rdkit.Chem import AllChem
 
 from pharmacophore.constants import (
     AMINO_ACID_ALIASES,
+    BACKBONE_ATOMS,
+    DEFAULT_CATION_PI_DIST,
+    DEFAULT_CLASH_DIST,
+    DEFAULT_HBOND_ANGLE,
+    DEFAULT_HBOND_DIST,
+    DEFAULT_HBOND_HEAVY_ANGLE,
+    DEFAULT_HYDROPHOBIC_DIST,
+    DEFAULT_IONIC_DIST,
+    DEFAULT_PI_STACKING_DIST,
     DEFAULT_POCKET_CUTOFF,
+    HYDROPHOBIC_RESIDUES,
     METAL_RESIDUES,
+    PROTEIN_AROMATIC_RESIDUES,
+    PROTEIN_AROMATIC_RING_ATOMS,
+    PROTEIN_NEG_ATOMS,
+    PROTEIN_POS_ATOMS,
     STANDARD_AMINO_ACIDS,
     WATER_RESIDUES,
 )
+
+_POS_CHARGED_N_QUERY = Chem.MolFromSmarts("[#7;+;!$([N+]([O-]))]")
+_POS_AMINE_QUERY = Chem.MolFromSmarts("[$([NX3;H2,H1,H0;!$(NC=O);!$(NS=O);!$(Na)])]")
+_NEG_ACID_O_QUERY = Chem.MolFromSmarts("[$([OX1-,OX2H1][CX3,SX4,PX4]=O)]")
+
+_SUMMARY_COLUMNS = [
+    "residue_name",
+    "residue_number",
+    "chain",
+    "is_backbone",
+    "interaction_type",
+    "ligand_atom_indices",
+    "protein_atom_name",
+    "distance",
+]
+
+_DETAILED_COLUMNS = _SUMMARY_COLUMNS + [
+    "angle",
+    "ligand_coords",
+    "protein_coords",
+]
 
 
 class PLI:
@@ -79,6 +114,7 @@ class PLI:
         ) = _build_heavy_atom_map(self.ligand)
 
         self.pocket_residues = self._extract_pocket_residues()
+        self._interaction_records = []
         self.interactions_df = None
 
     def _extract_pocket_residues(self) -> list[dict]:
@@ -215,6 +251,665 @@ class PLI:
                 "is_metal",
             ],
         )
+
+    def detect(
+        self,
+        include_hbonds: bool = True,
+        include_hydrophobic: bool = True,
+        include_aromatic: bool = True,
+        include_ionic: bool = True,
+        include_clashes: bool = False,
+        detailed: bool = False,
+        hbond_dist: float = DEFAULT_HBOND_DIST,
+        hbond_angle: float = DEFAULT_HBOND_ANGLE,
+        hydrophobic_dist: float = DEFAULT_HYDROPHOBIC_DIST,
+        ionic_dist: float = DEFAULT_IONIC_DIST,
+        pi_stacking_dist: float = DEFAULT_PI_STACKING_DIST,
+        cation_pi_dist: float = DEFAULT_CATION_PI_DIST,
+        clash_dist: float = DEFAULT_CLASH_DIST,
+    ) -> pd.DataFrame:
+        """
+        Detect 3D protein–ligand interactions within the extracted binding pocket.
+        :param include_hbonds: bool
+            Detect hydrogen bonds (HBond_Donor / HBond_Acceptor from the ligand's perspective).
+        :param include_hydrophobic: bool
+            Detect hydrophobic contacts grouped per contacting residue (excluding residues with specific
+            polar/aromatic contacts).
+        :param include_aromatic: bool
+            Detect aromatic pi-pi stacking and cation-pi interactions.
+        :param include_ionic: bool
+            Detect electrostatic salt bridges / ionic interactions.
+        :param include_clashes: bool
+            Detect non-H-bonding heavy-atom steric clashes below clash_dist Å.
+        :param detailed: bool
+            If True, also include angle, ligand_coords, and protein_coords.
+        :param hbond_dist: float
+            Maximum heavy-atom donor–acceptor distance (Å) for hydrogen bonds.
+        :param hbond_angle: float
+            Minimum D-H...A angle (degrees) when explicit donor hydrogen are present.
+        :param hydrophobic_dist: float
+            Maximum heavy-atom distance (Å) for hydrophobic contacts.
+        :param ionic_dist: float
+            Maximum heavy-atom distance (Å) for salt bridges / ionic interactions.
+        :param pi_stacking_dist: float
+            Maximum ring-centroid distance (Å) for aromatic pi-pi stacking.
+        :param cation_pi_dist: float
+            Maximum distance (Å) between a cation and an aromatic ring centroid for cation-pi contacts.
+        :param clash_dist: float
+            Distance threshold (Å) below which non-H-bonding heavy-atom contacts count as steric clashes.
+        :return: pd.DataFrame
+            Detected interactions sorted by chain, residue number, and interaction type.
+        """
+        lig_feats = self._classify_ligand_features()
+        rows: list[dict] = []
+        hbond_pairs: set[tuple[tuple, int]] = set()
+        specific_contact_residues: set[tuple] = set()
+
+        if include_hbonds:
+            hb_rows, hbond_pairs = self._detect_hbonds(lig_feats, hbond_dist, hbond_angle)
+            rows.extend(hb_rows)
+            specific_contact_residues.update(r["_res_key"] for r in hb_rows)
+
+        if include_ionic:
+            ionic_rows = self._detect_ionic(lig_feats, ionic_dist, hbond_pairs)
+            rows.extend(ionic_rows)
+            specific_contact_residues.update(r["_res_key"] for r in ionic_rows)
+
+        if include_aromatic:
+            arom_rows = self._detect_aromatic(lig_feats, pi_stacking_dist, cation_pi_dist)
+            rows.extend(arom_rows)
+            specific_contact_residues.update(r["_res_key"] for r in arom_rows)
+
+        if include_hydrophobic:
+            hydro_rows = self._detect_hydrophobic(
+                lig_feats, hydrophobic_dist, specific_contact_residues
+            )
+            rows.extend(hydro_rows)
+
+        if include_clashes:
+            clash_rows = self._detect_clashes(clash_dist, hbond_pairs)
+            rows.extend(clash_rows)
+
+        for row in rows:
+            row.pop("_res_key", None)
+
+        rows.sort(key=lambda r: (r["chain"], r["residue_number"], r["interaction_type"]))
+        self._interaction_records = rows
+
+        columns = _DETAILED_COLUMNS if detailed else _SUMMARY_COLUMNS
+        df = pd.DataFrame(rows, columns=columns)
+        self.interactions_df = df
+        return df
+
+    def _classify_ligand_features(self) -> dict:
+        """
+        Identify donors, acceptors, ionizable groups, aromatic rings, and hydrophobic atoms on the ligand.
+        """
+        donors: list[tuple[int, int, tuple[int, ...]]] = []
+        acceptors: list[tuple[int, int]] = []
+        hydrophobes: set[int] = set()
+
+        for heavy_idx in range(self.ligand_no_h.GetNumAtoms()):
+            full_idx = self.heavy_to_full_idx[heavy_idx]
+            full_atom = self.ligand.GetAtomWithIdx(full_idx)
+            heavy_atom = self.ligand_no_h.GetAtomWithIdx(heavy_idx)
+            anum = heavy_atom.GetAtomicNum()
+            chg = heavy_atom.GetFormalCharge()
+
+            if anum in (7, 8, 16):
+                explicit_hs = tuple(
+                    nbr.GetIdx() for nbr in full_atom.GetNeighbors() if nbr.GetAtomicNum() == 1
+                )
+                if explicit_hs or heavy_atom.GetTotalNumHs() > 0:
+                    donors.append((heavy_idx, full_idx, explicit_hs))
+
+                if anum == 8 and chg <= 0:
+                    acceptors.append((heavy_idx, full_idx))
+                elif anum == 7 and chg <= 0 and full_atom.GetTotalDegree() < 4:
+                    # Exclude non-accepting pyrrole-like, amide, or sulfonamide NH donors
+                    has_h = bool(explicit_hs) or heavy_atom.GetTotalNumHs() > 0
+                    attached_to_xo = any(
+                        nb.GetAtomicNum() in (6, 16)
+                        and any(
+                            b.GetBondTypeAsDouble() == 2.0 and b.GetOtherAtom(nb).GetAtomicNum() == 8
+                            for b in nb.GetBonds()
+                        )
+                        for nb in heavy_atom.GetNeighbors()
+                    )
+                    if not (has_h and (heavy_atom.GetIsAromatic() or attached_to_xo)):
+                        acceptors.append((heavy_idx, full_idx))
+                elif anum == 16 and chg <= 0 and heavy_atom.GetDegree() <= 2:
+                    acceptors.append((heavy_idx, full_idx))
+
+            is_nonpolar_c = (
+                anum == 6
+                and chg == 0
+                and not any(nb.GetAtomicNum() in (7, 8, 15, 16) for nb in heavy_atom.GetNeighbors())
+            )
+            if is_nonpolar_c or anum in (9, 17, 35, 53):
+                hydrophobes.add(heavy_idx)
+
+        pos_atoms: set[int] = set()
+        for q in (_POS_CHARGED_N_QUERY, _POS_AMINE_QUERY):
+            if q is not None:
+                for match in self.ligand_no_h.GetSubstructMatches(q):
+                    pos_atoms.add(match[0])
+
+        neg_atoms: set[int] = {
+            atom.GetIdx()
+            for atom in self.ligand_no_h.GetAtoms()
+            if atom.GetFormalCharge() < 0
+        }
+        if _NEG_ACID_O_QUERY is not None:
+            for match in self.ligand_no_h.GetSubstructMatches(_NEG_ACID_O_QUERY):
+                neg_atoms.add(match[0])
+
+        lig_conf = self.ligand_no_h.GetConformer()
+        arom_rings: list[tuple[tuple[int, ...], np.ndarray, np.ndarray]] = []
+        for ring in self.ligand_no_h.GetRingInfo().AtomRings():
+            if len(ring) in (5, 6) and all(
+                self.ligand_no_h.GetAtomWithIdx(i).GetIsAromatic() for i in ring
+            ):
+                coords = np.array([lig_conf.GetAtomPosition(i) for i in ring], dtype=float)
+                centroid = coords.mean(axis=0)
+                normal = _ring_normal(coords)
+                arom_rings.append((tuple(ring), centroid, normal))
+
+        return {
+            "donors": donors,
+            "acceptors": acceptors,
+            "pos_atoms": sorted(pos_atoms),
+            "neg_atoms": sorted(neg_atoms),
+            "arom_rings": arom_rings,
+            "hydrophobes": hydrophobes,
+        }
+
+    def _detect_hbonds(
+        self,
+        lig_feats: dict,
+        hbond_dist: float,
+        hbond_angle: float,
+    ) -> tuple[list[dict], set[tuple[tuple, int]]]:
+        """
+        Detect hydrogen bonds between pocket residues and ligand donors/acceptors.
+        """
+        prot_conf = self.protein.GetConformer()
+        lig_conf_full = self.ligand.GetConformer()
+
+        prot_donors = []
+        prot_acceptors = []
+        for res in self.pocket_residues:
+            res_key = _residue_key(res)
+            for p_idx in res["heavy_atom_indices"]:
+                p_atom = self.protein.GetAtomWithIdx(p_idx)
+                if p_atom.GetAtomicNum() not in (7, 8, 16):
+                    continue
+                info = p_atom.GetPDBResidueInfo()
+                atom_name = info.GetName().strip().upper()
+                can_don, can_acc, is_bb = _protein_hbond_role(
+                    res["residue_name"], res["pdb_residue_name"], atom_name, p_atom
+                )
+                p_pos = np.array(prot_conf.GetAtomPosition(p_idx), dtype=float)
+                if can_don:
+                    prot_donors.append((res, res_key, p_idx, atom_name, is_bb, p_atom, p_pos))
+                if can_acc:
+                    prot_acceptors.append((res, res_key, p_idx, atom_name, is_bb, p_pos))
+
+        best: dict[tuple[tuple, str, int], dict] = {}
+
+        # Ligand Donor -> Protein Acceptor
+        for lig_h_idx, lig_f_idx, _ in lig_feats["donors"]:
+            d_atom = self.ligand.GetAtomWithIdx(lig_f_idx)
+            d_pos = np.array(lig_conf_full.GetAtomPosition(lig_f_idx), dtype=float)
+            for res, res_key, _, atom_name, is_bb, a_pos in prot_acceptors:
+                dist = float(np.linalg.norm(d_pos - a_pos))
+                if not (2.0 <= dist <= hbond_dist):
+                    continue
+                ok, ang = _eval_hbond_geometry(
+                    d_atom, d_pos, a_pos, lig_conf_full, hbond_angle, DEFAULT_HBOND_HEAVY_ANGLE
+                )
+                if not ok:
+                    continue
+                key = (res_key, "HBond_Donor", lig_h_idx)
+                if key not in best or dist < best[key]["distance"]:
+                    best[key] = _make_row(
+                        res, res_key, is_bb, "HBond_Donor", (lig_h_idx,),
+                        atom_name, dist, ang, d_pos, a_pos,
+                    )
+
+        # Protein Donor -> Ligand Acceptor
+        for res, res_key, _, atom_name, is_bb, d_atom, d_pos in prot_donors:
+            for lig_h_idx, lig_f_idx in lig_feats["acceptors"]:
+                a_pos = np.array(lig_conf_full.GetAtomPosition(lig_f_idx), dtype=float)
+                dist = float(np.linalg.norm(d_pos - a_pos))
+                if not (2.0 <= dist <= hbond_dist):
+                    continue
+                ok, ang = _eval_hbond_geometry(
+                    d_atom, d_pos, a_pos, prot_conf, hbond_angle, DEFAULT_HBOND_HEAVY_ANGLE
+                )
+                if not ok:
+                    continue
+                key = (res_key, "HBond_Acceptor", lig_h_idx)
+                if key not in best or dist < best[key]["distance"]:
+                    best[key] = _make_row(
+                        res, res_key, is_bb, "HBond_Acceptor", (lig_h_idx,),
+                        atom_name, dist, ang, a_pos, d_pos,
+                    )
+
+        rows = list(best.values())
+        hbond_pairs = {(r["_res_key"], r["ligand_atom_indices"][0]) for r in rows}
+        return rows, hbond_pairs
+
+    def _detect_ionic(
+        self,
+        lig_feats: dict,
+        ionic_dist: float,
+        hbond_pairs: set[tuple[tuple, int]],
+    ) -> list[dict]:
+        """
+        Detect salt bridges / ionic interactions between oppositely charged ligand and protein atoms.
+        """
+        prot_conf = self.protein.GetConformer()
+        lig_conf = self.ligand_no_h.GetConformer()
+        best: dict[tuple[tuple, int], dict] = {}
+
+        for res in self.pocket_residues:
+            res_key = _residue_key(res)
+            canon = res["residue_name"]
+            pdb_res = res["pdb_residue_name"]
+
+            pos_names = set(PROTEIN_POS_ATOMS.get(canon, ()))
+            if pdb_res == "HIP":
+                pos_names.update({"ND1", "NE2"})
+
+            neg_names = set(PROTEIN_NEG_ATOMS.get(canon, ()))
+            if pdb_res in ("ASH", "GLH"):
+                neg_names.clear()
+
+            if not pos_names and not neg_names:
+                continue
+
+            for p_idx in res["heavy_atom_indices"]:
+                p_atom = self.protein.GetAtomWithIdx(p_idx)
+                atom_name = p_atom.GetPDBResidueInfo().GetName().strip().upper()
+                p_pos = np.array(prot_conf.GetAtomPosition(p_idx), dtype=float)
+
+                target_lig_atoms: list[int] = []
+                if atom_name in pos_names:
+                    target_lig_atoms = lig_feats["neg_atoms"]
+                elif atom_name in neg_names:
+                    target_lig_atoms = lig_feats["pos_atoms"]
+
+                for l_idx in target_lig_atoms:
+                    if (res_key, l_idx) in hbond_pairs:
+                        continue
+                    l_pos = np.array(lig_conf.GetAtomPosition(l_idx), dtype=float)
+                    dist = float(np.linalg.norm(p_pos - l_pos))
+                    if dist <= ionic_dist:
+                        key = (res_key, l_idx)
+                        if key not in best or dist < best[key]["distance"]:
+                            best[key] = _make_row(
+                                res, res_key, False, "Ionic", (l_idx,),
+                                atom_name, dist, None, l_pos, p_pos,
+                            )
+
+        return list(best.values())
+
+    def _detect_aromatic(
+        self,
+        lig_feats: dict,
+        pi_stacking_dist: float,
+        cation_pi_dist: float,
+    ) -> list[dict]:
+        """
+        Detect aromatic pi-pi stacking and cation-pi interactions.
+        """
+        prot_conf = self.protein.GetConformer()
+        lig_conf = self.ligand_no_h.GetConformer()
+
+        best_pi: dict[tuple[tuple, tuple[int, ...]], dict] = {}
+        best_cat: dict[tuple[tuple, tuple[int, ...]], dict] = {}
+
+        for res in self.pocket_residues:
+            res_key = _residue_key(res)
+            canon = res["residue_name"]
+
+            # Protein aromatic rings -> Ligand aromatic rings (Pi_Stacking) and Ligand cations (Cation_Pi)
+            if canon in PROTEIN_AROMATIC_RESIDUES:
+                prot_rings = self._extract_protein_aromatic_rings(res)
+                for _, p_cent, p_norm in prot_rings:
+                    for l_ring, l_cent, l_norm in lig_feats["arom_rings"]:
+                        dist = float(np.linalg.norm(p_cent - l_cent))
+                        if dist > pi_stacking_dist:
+                            continue
+                        theta = float(
+                            np.degrees(np.arccos(np.clip(abs(float(np.dot(p_norm, l_norm))), 0.0, 1.0)))
+                        )
+                        is_parallel = dist <= 5.0 and theta <= 40.0
+                        is_t_shaped = dist <= pi_stacking_dist and 50.0 <= theta <= 90.0
+                        if is_parallel or is_t_shaped:
+                            key = (res_key, l_ring)
+                            if key not in best_pi or dist < best_pi[key]["distance"]:
+                                best_pi[key] = _make_row(
+                                    res, res_key, False, "Pi_Stacking", l_ring,
+                                    "RING", dist, theta, l_cent, p_cent,
+                                )
+
+                    for l_pos_idx in lig_feats["pos_atoms"]:
+                        l_pos = np.array(lig_conf.GetAtomPosition(l_pos_idx), dtype=float)
+                        dist = float(np.linalg.norm(p_cent - l_pos))
+                        if dist <= cation_pi_dist:
+                            key = (res_key, (l_pos_idx,))
+                            if key not in best_cat or dist < best_cat[key]["distance"]:
+                                best_cat[key] = _make_row(
+                                    res, res_key, False, "Cation_Pi", (l_pos_idx,),
+                                    "RING", dist, None, l_pos, p_cent,
+                                )
+
+            # Protein cations (LYS NZ / ARG CZ) -> Ligand aromatic rings (Cation_Pi)
+            cation_names = {"NZ"} if canon == "LYS" else ({"CZ"} if canon == "ARG" else set())
+            if cation_names and lig_feats["arom_rings"]:
+                for p_idx in res["heavy_atom_indices"]:
+                    atom_name = self.protein.GetAtomWithIdx(p_idx).GetPDBResidueInfo().GetName().strip().upper()
+                    if atom_name not in cation_names:
+                        continue
+                    p_pos = np.array(prot_conf.GetAtomPosition(p_idx), dtype=float)
+                    for l_ring, l_cent, _ in lig_feats["arom_rings"]:
+                        dist = float(np.linalg.norm(p_pos - l_cent))
+                        if dist <= cation_pi_dist:
+                            key = (res_key, l_ring)
+                            if key not in best_cat or dist < best_cat[key]["distance"]:
+                                best_cat[key] = _make_row(
+                                    res, res_key, False, "Cation_Pi", l_ring,
+                                    atom_name, dist, None, l_cent, p_pos,
+                                )
+
+        return list(best_pi.values()) + list(best_cat.values())
+
+    def _extract_protein_aromatic_rings(
+        self, res_entry: dict
+    ) -> list[tuple[tuple[int, ...], np.ndarray, np.ndarray]]:
+        """
+        Extract (atom_indices, centroid, unit_normal) for aromatic sidechain rings of a pocket residue.
+        """
+        prot_conf = self.protein.GetConformer()
+        res_set = set(res_entry["heavy_atom_indices"])
+        seen: set[frozenset[int]] = set()
+        rings: list[tuple[tuple[int, ...], np.ndarray, np.ndarray]] = []
+
+        for ring in self.protein.GetRingInfo().AtomRings():
+            if len(ring) in (5, 6) and set(ring).issubset(res_set):
+                fset = frozenset(ring)
+                seen.add(fset)
+                coords = np.array([prot_conf.GetAtomPosition(i) for i in ring], dtype=float)
+                rings.append((tuple(ring), coords.mean(axis=0), _ring_normal(coords)))
+
+        # Fallback by standard PDB atom names when sanitization/bond order skipped a ring
+        name_to_idx = {
+            self.protein.GetAtomWithIdx(i).GetPDBResidueInfo().GetName().strip().upper(): i
+            for i in res_entry["heavy_atom_indices"]
+        }
+        for ring_names in PROTEIN_AROMATIC_RING_ATOMS.get(res_entry["residue_name"], ()):
+            if all(n in name_to_idx for n in ring_names):
+                ring = tuple(name_to_idx[n] for n in ring_names)
+                fset = frozenset(ring)
+                if fset not in seen:
+                    seen.add(fset)
+                    coords = np.array([prot_conf.GetAtomPosition(i) for i in ring], dtype=float)
+                    rings.append((ring, coords.mean(axis=0), _ring_normal(coords)))
+
+        return rings
+
+    def _detect_hydrophobic(
+        self,
+        lig_feats: dict,
+        hydrophobic_dist: float,
+        specific_contact_residues: set[tuple],
+    ) -> list[dict]:
+        """
+        Detect hydrophobic contacts grouped into one row per contacting hydrophobic residue.
+        """
+        if not lig_feats["hydrophobes"]:
+            return []
+
+        prot_conf = self.protein.GetConformer()
+        lig_conf = self.ligand_no_h.GetConformer()
+        lig_positions = lig_conf.GetPositions()
+        lig_hyd_indices = sorted(lig_feats["hydrophobes"])
+
+        rows: list[dict] = []
+        for res in self.pocket_residues:
+            res_key = _residue_key(res)
+            if res["residue_name"] not in HYDROPHOBIC_RESIDUES:
+                continue
+            if res_key in specific_contact_residues:
+                continue
+
+            hit_lig_indices: set[int] = set()
+            min_dist = float("inf")
+            min_prot_name = ""
+            min_prot_pos = None
+
+            for p_idx in res["heavy_atom_indices"]:
+                p_atom = self.protein.GetAtomWithIdx(p_idx)
+                atom_name = p_atom.GetPDBResidueInfo().GetName().strip().upper()
+                if atom_name in BACKBONE_ATOMS or p_atom.GetSymbol() not in ("C", "S"):
+                    continue
+                p_pos = np.array(prot_conf.GetAtomPosition(p_idx), dtype=float)
+
+                for l_idx in lig_hyd_indices:
+                    dist = float(np.linalg.norm(p_pos - lig_positions[l_idx]))
+                    if 2.0 <= dist <= hydrophobic_dist:
+                        hit_lig_indices.add(l_idx)
+                        if dist < min_dist:
+                            min_dist = dist
+                            min_prot_name = atom_name
+                            min_prot_pos = p_pos
+
+            if hit_lig_indices and min_prot_pos is not None:
+                sorted_lig = tuple(sorted(hit_lig_indices))
+                lig_centroid = lig_positions[list(sorted_lig)].mean(axis=0)
+                rows.append(
+                    _make_row(
+                        res, res_key, False, "Hydrophobic", sorted_lig,
+                        min_prot_name, min_dist, None, lig_centroid, min_prot_pos,
+                    )
+                )
+
+        return rows
+
+    def _detect_clashes(
+        self,
+        clash_dist: float,
+        hbond_pairs: set[tuple[tuple, int]],
+    ) -> list[dict]:
+        """
+        Detect non-H-bonding heavy-atom steric clashes below clash_dist Å.
+        """
+        prot_conf = self.protein.GetConformer()
+        lig_positions = self.ligand_no_h.GetConformer().GetPositions()
+        best: dict[tuple[tuple, int], dict] = {}
+
+        for res in self.pocket_residues:
+            if res["is_water"]:
+                continue
+            res_key = _residue_key(res)
+            for p_idx in res["heavy_atom_indices"]:
+                p_atom = self.protein.GetAtomWithIdx(p_idx)
+                atom_name = p_atom.GetPDBResidueInfo().GetName().strip().upper()
+                is_bb = atom_name in BACKBONE_ATOMS
+                p_pos = np.array(prot_conf.GetAtomPosition(p_idx), dtype=float)
+
+                for l_idx in range(len(lig_positions)):
+                    if (res_key, l_idx) in hbond_pairs:
+                        continue
+                    dist = float(np.linalg.norm(p_pos - lig_positions[l_idx]))
+                    if dist < clash_dist:
+                        key = (res_key, l_idx)
+                        if key not in best or dist < best[key]["distance"]:
+                            best[key] = _make_row(
+                                res, res_key, is_bb, "Clash", (l_idx,),
+                                atom_name, dist, None, lig_positions[l_idx], p_pos,
+                            )
+
+        return list(best.values())
+
+
+def _residue_key(res_entry: dict) -> tuple[str, int, str, str]:
+    """Return a unique hashable key for a pocket residue entry."""
+    return (
+        res_entry["chain"],
+        res_entry["residue_number"],
+        res_entry["insertion_code"],
+        res_entry["pdb_residue_name"],
+    )
+
+
+def _make_row(
+    res_entry: dict,
+    res_key: tuple,
+    is_backbone: bool,
+    interaction_type: str,
+    ligand_atom_indices: tuple[int, ...],
+    protein_atom_name: str,
+    distance: float,
+    angle: Optional[float],
+    ligand_coords: np.ndarray,
+    protein_coords: np.ndarray,
+) -> dict:
+    """Assemble one standardized interaction record."""
+    return {
+        "_res_key": res_key,
+        "residue_name": res_entry["residue_name"],
+        "residue_number": res_entry["residue_number"],
+        "chain": res_entry["chain"],
+        "is_backbone": bool(is_backbone),
+        "interaction_type": interaction_type,
+        "ligand_atom_indices": tuple(ligand_atom_indices),
+        "protein_atom_name": protein_atom_name,
+        "distance": round(float(distance), 3),
+        "angle": round(float(angle), 2) if angle is not None else None,
+        "ligand_coords": tuple(round(float(v), 4) for v in ligand_coords),
+        "protein_coords": tuple(round(float(v), 4) for v in protein_coords),
+    }
+
+
+def _ring_normal(coords: np.ndarray) -> np.ndarray:
+    """Compute a unit normal vector for a planar ring via SVD."""
+    centered = coords - coords.mean(axis=0)
+    _, _, vh = np.linalg.svd(centered)
+    normal = vh[-1]
+    norm = float(np.linalg.norm(normal))
+    return normal / norm if norm > 1e-12 else np.array([0.0, 0.0, 1.0])
+
+
+def _angle_deg(a: np.ndarray, vertex: np.ndarray, b: np.ndarray) -> float:
+    """Compute the angle A-vertex-B in degrees."""
+    v1 = a - vertex
+    v2 = b - vertex
+    denom = float(np.linalg.norm(v1) * np.linalg.norm(v2))
+    if denom < 1e-12:
+        return 0.0
+    cos_ang = float(np.clip(np.dot(v1, v2) / denom, -1.0, 1.0))
+    return float(np.degrees(np.arccos(cos_ang)))
+
+
+def _eval_hbond_geometry(
+    donor_atom: Chem.Atom,
+    donor_pos: np.ndarray,
+    acceptor_pos: np.ndarray,
+    donor_conf: Chem.Conformer,
+    min_h_angle: float,
+    min_heavy_angle: float,
+) -> tuple[bool, Optional[float]]:
+    """
+    Validate hydrogen-bond angle using explicit H neighbors when present, falling back to heavy-atom
+    antecedent geometry on unprotonated structures.
+    """
+    h_neighbors = [nbr for nbr in donor_atom.GetNeighbors() if nbr.GetAtomicNum() == 1]
+    if h_neighbors:
+        best_ang = -1.0
+        best_ok = False
+        for h_atom in h_neighbors:
+            h_pos = np.array(donor_conf.GetAtomPosition(h_atom.GetIdx()), dtype=float)
+            h_acc_dist = float(np.linalg.norm(h_pos - acceptor_pos))
+            ang = _angle_deg(donor_pos, h_pos, acceptor_pos)
+            if ang > best_ang:
+                best_ang = ang
+                best_ok = h_acc_dist <= 2.6 and ang >= min_h_angle
+        return best_ok, best_ang
+
+    heavy_neighbors = [nbr for nbr in donor_atom.GetNeighbors() if nbr.GetAtomicNum() > 1]
+    if not heavy_neighbors:
+        return True, None
+
+    angles = [
+        _angle_deg(
+            np.array(donor_conf.GetAtomPosition(nbr.GetIdx()), dtype=float),
+            donor_pos,
+            acceptor_pos,
+        )
+        for nbr in heavy_neighbors
+    ]
+    mean_ang = float(np.mean(angles))
+    passed = mean_ang >= min_heavy_angle and min(angles) >= 75.0
+    return passed, mean_ang
+
+
+def _protein_hbond_role(
+    canonical_res: str,
+    pdb_res: str,
+    atom_name: str,
+    atom: Chem.Atom,
+) -> tuple[bool, bool, bool]:
+    """
+    Return (can_donate, can_accept, is_backbone) for a protein N/O/S atom.
+    """
+    if canonical_res in WATER_RESIDUES:
+        return True, True, False
+    if atom_name == "N":
+        return canonical_res != "PRO", False, True
+    if atom_name in ("O", "OXT"):
+        return False, True, True
+
+    pure_donors = {
+        ("LYS", "NZ"),
+        ("ARG", "NE"), ("ARG", "NH1"), ("ARG", "NH2"),
+        ("TRP", "NE1"),
+        ("ASN", "ND2"),
+        ("GLN", "NE2"),
+    }
+    if (canonical_res, atom_name) in pure_donors:
+        return True, False, False
+
+    if canonical_res == "ASP" and atom_name in ("OD1", "OD2"):
+        return pdb_res == "ASH", True, False
+    if canonical_res == "GLU" and atom_name in ("OE1", "OE2"):
+        return pdb_res == "GLH", True, False
+    if (canonical_res, atom_name) in {("ASN", "OD1"), ("GLN", "OE1"), ("MET", "SD")}:
+        return False, True, False
+
+    if (canonical_res, atom_name) in {("SER", "OG"), ("THR", "OG1"), ("TYR", "OH")}:
+        return True, True, False
+    if canonical_res == "CYS" and atom_name == "SG":
+        if pdb_res == "CYX":
+            return False, False, False
+        if pdb_res == "CYM":
+            return False, True, False
+        return True, True, False
+
+    if canonical_res == "HIS" and atom_name in ("ND1", "NE2"):
+        if any(nbr.GetAtomicNum() == 1 for nbr in atom.GetNeighbors()):
+            return True, False, False
+        if pdb_res == "HIP":
+            return True, False, False
+        if pdb_res == "HID":
+            return atom_name == "ND1", atom_name == "NE2", False
+        if pdb_res == "HIE":
+            return atom_name == "NE2", atom_name == "ND1", False
+        return True, True, False
+
+    return False, False, False
 
 
 def _load_protein(protein_pdb: str, add_hs: bool = False) -> Chem.Mol:
