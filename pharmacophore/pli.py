@@ -116,6 +116,7 @@ class PLI:
         self.pocket_residues = self._extract_pocket_residues()
         self._interaction_records = []
         self.interactions_df = None
+        self.features_list = None
 
     def _extract_pocket_residues(self) -> list[dict]:
         """
@@ -340,6 +341,78 @@ class PLI:
         df = pd.DataFrame(rows, columns=columns)
         self.interactions_df = df
         return df
+
+    def _to_pharmacophore(self, **detect_kwargs) -> list:
+        """
+        Internal helper to convert detected 3D protein–ligand interactions into pharmacophore-toolkit's
+        standard feature list.
+        :param detect_kwargs: dict
+            Optional keyword arguments forwarded to PLI.detect() (forces recomputation when supplied).
+        :return: list
+            List of [family: str, atom_indices: tuple, x: float, y: float, z: float] entries.
+        """
+        if detect_kwargs or self.interactions_df is None:
+            self.detect(**detect_kwargs)
+
+        lig_feats = self._classify_ligand_features()
+        pos_atoms = set(lig_feats["pos_atoms"])
+
+        features_list: list = []
+        seen: set[tuple[str, frozenset[int]]] = set()
+        aromatic_atoms: set[int] = set()
+        hydrophobic_atoms: set[int] = set()
+
+        for rec in self._interaction_records:
+            itype = rec["interaction_type"]
+            atom_indices = tuple(rec["ligand_atom_indices"])
+            lx, ly, lz = rec["ligand_coords"]
+
+            if itype == "Hydrophobic":
+                hydrophobic_atoms.update(atom_indices)
+                continue
+
+            if itype == "HBond_Donor":
+                family = "Donor"
+            elif itype == "HBond_Acceptor":
+                family = "Acceptor"
+            elif itype == "Pi_Stacking":
+                family = "Aromatic"
+            elif itype == "Cation_Pi":
+                family = "Aromatic" if len(atom_indices) > 1 else "PosIonizable"
+            elif itype == "Ionic":
+                family = "PosIonizable" if atom_indices[0] in pos_atoms else "NegIonizable"
+            else:
+                continue
+
+            dedup_key = (family, frozenset(atom_indices))
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+
+            if family == "Aromatic":
+                aromatic_atoms.update(atom_indices)
+
+            features_list.append(
+                [family, atom_indices, round(float(lx), 4), round(float(ly), 4), round(float(lz), 4)]
+            )
+
+        remaining_hydrophobes = sorted(hydrophobic_atoms - aromatic_atoms)
+        if remaining_hydrophobes:
+            lig_conf = self.ligand_no_h.GetConformer()
+            for patch in _connected_atom_patches(self.ligand_no_h, remaining_hydrophobes):
+                coords = np.mean([lig_conf.GetAtomPosition(i) for i in patch], axis=0)
+                features_list.append(
+                    [
+                        "Hydrophobe",
+                        patch,
+                        round(float(coords[0]), 4),
+                        round(float(coords[1]), 4),
+                        round(float(coords[2]), 4),
+                    ]
+                )
+
+        self.features_list = features_list
+        return features_list
 
     def _classify_ligand_features(self) -> dict:
         """
@@ -753,6 +826,33 @@ class PLI:
                             )
 
         return list(best.values())
+
+
+def _connected_atom_patches(mol: Chem.Mol, atom_indices: list[int]) -> list[tuple[int, ...]]:
+    """
+    Partition a subset of ligand atom indices into covalently connected components.
+    """
+    target = set(atom_indices)
+    visited: set[int] = set()
+    patches: list[tuple[int, ...]] = []
+
+    for start in sorted(target):
+        if start in visited:
+            continue
+        component: list[int] = []
+        stack = [start]
+        visited.add(start)
+        while stack:
+            cur = stack.pop()
+            component.append(cur)
+            for nbr in mol.GetAtomWithIdx(cur).GetNeighbors():
+                nidx = nbr.GetIdx()
+                if nidx in target and nidx not in visited:
+                    visited.add(nidx)
+                    stack.append(nidx)
+        patches.append(tuple(sorted(component)))
+
+    return patches
 
 
 def _residue_key(res_entry: dict) -> tuple[str, int, str, str]:
