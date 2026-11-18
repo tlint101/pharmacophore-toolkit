@@ -70,6 +70,38 @@ def color_convert(color: Optional[str] = None):
         raise ValueError(f"{color} is not a valid color!")
 
 
+# 3-letter amino acid codes
+AMINO_ACID_ALIASES = {
+    "HID": "HIS",
+    "HIE": "HIS",
+    "HIP": "HIS",
+    "HSD": "HIS",
+    "HSE": "HIS",
+    "HSP": "HIS",
+    "CYX": "CYS",
+    "CYM": "CYS",
+    "ASH": "ASP",
+    "GLH": "GLU",
+    "LYN": "LYS",
+    "MSE": "MET",
+}
+
+STANDARD_AMINO_ACIDS = frozenset({
+    "ALA", "ARG", "ASN", "ASP", "CYS",
+    "GLN", "GLU", "GLY", "HIS", "ILE",
+    "LEU", "LYS", "MET", "PHE", "PRO",
+    "SER", "THR", "TRP", "TYR", "VAL",
+    "SEC", "PYL",
+    *AMINO_ACID_ALIASES.keys(),
+})
+
+# protonation/force-field variants
+WATER_RESIDUES = frozenset({"HOH", "WAT", "SOL", "DOD", "H2O"})
+
+METAL_RESIDUES = frozenset({"MG", "ZN", "MN", "FE", "CA", "CU", "CO", "NI", "NA", "K", "CD", "HG"})
+
+DEFAULT_POCKET_CUTOFF = 6.0
+
 if __name__ == "__main__":
     import doctest
 
