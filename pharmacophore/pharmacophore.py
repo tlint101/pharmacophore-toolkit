@@ -261,7 +261,9 @@ class Pharmacophore:
 
             # to give sequential numbering for each group:
             feature_counts = {
-                "Acceptor": 0, "Donor": 0, "Hydrophobe": 0, "Aromatic": 0, "LumpedHydrophobe": 0, "PosIonizable": 0}
+                "Acceptor": 0, "Donor": 0, "Hydrophobe": 0, "Aromatic": 0,
+                "LumpedHydrophobe": 0, "PosIonizable": 0, "NegIonizable": 0,
+            }
 
             # get features
             for feat in feature_list:
@@ -295,16 +297,19 @@ class Pharmacophore:
                 f.write("color aromatic_color, Aromatic_*\n")
                 f.write("\n")
                 f.write("show spheres, LumpedHydrophobe_*\n")
-                f.write("color lumpedhydrophobe, LumpedHydrophobe_*\n")
+                f.write("color lumpedhydrophobe_color, LumpedHydrophobe_*\n")
                 f.write("\n")
                 f.write("show spheres, PosIonizable*\n")
-                f.write("color posionizable, PosIonizable*\n")
+                f.write("color posionizable_color, PosIonizable*\n")
+                f.write("\n")
+                f.write("show spheres, NegIonizable_*\n")
+                f.write("color negionizable_color, NegIonizable_*\n")
                 f.write("\n")
                 f.write(f"set sphere_scale, {sphere_size}\n")  # Adjust sphere size in PyMOL
             elif type == "surface":
                 f.write("show surface, Acceptor_*\n")
                 f.write("color acceptor_color, Acceptor_*\n")
-                f.write(f"set transparency, {transparency}, Acceptor_*")
+                f.write(f"set transparency, {transparency}, Acceptor_*\n")
                 f.write("\n")
                 f.write("show surface, Donor_*\n")
                 f.write("color donor_color, Donor_*\n")
@@ -319,12 +324,16 @@ class Pharmacophore:
                 f.write(f"set transparency, {transparency}, Aromatic_*\n")
                 f.write("\n")
                 f.write("show surface, LumpedHydrophobe_*\n")
-                f.write("color lumpedhydrophobe, LumpedHydrophobe_*\n")
+                f.write("color lumpedhydrophobe_color, LumpedHydrophobe_*\n")
                 f.write(f"set transparency, {transparency}, LumpedHydrophobe_*\n")
                 f.write("\n")
                 f.write("show surface, PosIonizable*\n")
-                f.write("color posionizable, PosIonizable*\n")
+                f.write("color posionizable_color, PosIonizable*\n")
                 f.write(f"set transparency, {transparency}, PosIonizable*\n")
+                f.write("\n")
+                f.write("show surface, NegIonizable_*\n")
+                f.write("color negionizable_color, NegIonizable_*\n")
+                f.write(f"set transparency, {transparency}, NegIonizable_*\n")
                 f.write("\n")
             else:
                 raise ValueError("Issue with type {type}! Only 'sphere' or 'surface' allowed!")

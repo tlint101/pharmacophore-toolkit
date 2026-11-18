@@ -41,7 +41,8 @@ FEATURE_COLORS = {
     "Aromatic": (0.8549019607843137, 0.6470588235294118, 0.12549019607843137),  # goldenrod
     "Hydrophobe": (0.1803921568627451, 0.5450980392156862, 0.3411764705882353),  # seagreen
     "LumpedHydrophobe": (0.1803921568627451, 0.5450980392156862, 0.3411764705882353),  # seagreen
-    "PosIonizable": (0.0, 0.7490196078431373, 1.0)  # deepskyblue
+    "PosIonizable": (0.0, 0.7490196078431373, 1.0),  # deepskyblue
+    "NegIonizable": (0.7294117647058823, 0.3333333333333333, 0.8274509803921568),  # mediumorchid
 }
 
 # for rendering py3dmol
@@ -51,7 +52,8 @@ INTERACTIVE_COLORS = {
     "Aromatic": "goldenrod",
     "Hydrophobe": "seagreen",
     "LumpedHydrophobe": "seagreen",
-    "PosIonizable": "deepskyblue"
+    "PosIonizable": "deepskyblue",
+    "NegIonizable": "mediumorchid",
 }
 
 
