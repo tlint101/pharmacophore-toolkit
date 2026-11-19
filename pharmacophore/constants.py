@@ -127,7 +127,7 @@ DEFAULT_METAL_DIST = 2.8
 DEFAULT_VDW_TOLERANCE = 0.0
 DEFAULT_CLASH_DIST = 2.2
 
-PROLIF_INTERACTION_ORDER = (
+PROLIG_INTERACTION_ORDER = (
     "HBDonor",
     "HBAcceptor",
     "XBDonor",
@@ -141,6 +141,14 @@ PROLIF_INTERACTION_ORDER = (
     "Anionic",
     "MetalDonor",
     "MetalAcceptor",
+    "Hydrophobic",
+    "VdWContact",
+)
+
+PROLIG_DEFAULT_INTERACTIONS = (
+    "HBDonor",
+    "HBAcceptor",
+    "PiStacking",
     "Hydrophobic",
     "VdWContact",
 )
