@@ -306,7 +306,7 @@ class PLI:
             ],
         )
 
-    def detect(
+    def _detect(
         self,
         include_hbonds: bool = True,
         include_hydrophobic: bool = True,
@@ -617,12 +617,12 @@ class PLI:
         Internal helper to convert detected 3D protein–ligand interactions into pharmacophore-toolkit's
         standard feature list.
         :param detect_kwargs: dict
-            Optional keyword arguments forwarded to PLI.detect() (forces recomputation when supplied).
+            Optional keyword arguments forwarded to PLI._detect() (forces recomputation when supplied).
         :return: list
             List of [family: str, atom_indices: tuple, x: float, y: float, z: float] entries.
         """
         if detect_kwargs or self.interactions_df is None:
-            self.detect(**detect_kwargs)
+            self._detect(**detect_kwargs)
 
         lig_feats = self._classify_ligand_features()
         pos_atoms = set(lig_feats["pos_atoms"])
@@ -697,6 +697,7 @@ class PLI:
         dash_width: Optional[float] = 5.0,
         dash_radius: Optional[float] = 0.12,
         color: Optional[dict] = None,
+        **detect_kwargs,
     ) -> str:
         """
         Write a drag-and-drop PyMOL (.pml) visualization script for the detected protein–ligand interactions.
@@ -724,6 +725,8 @@ class PLI:
         :param color: Optional[dict]
             Optional dictionary mapping interaction types (e.g., 'HBond', 'Pi_Stacking') to color names,
             hex strings, or RGB tuples.
+        :param detect_kwargs: dict
+            Optional keyword arguments forwarded to PLI._detect() (forces recomputation when supplied).
         :return: str
             Path to the written .pml file.
         """
@@ -737,8 +740,8 @@ class PLI:
                 f"Invalid pocket_repr={pocket_repr!r}. Only 'lines', 'sticks', or None are supported."
             )
 
-        if self.interactions_df is None:
-            self.detect()
+        if detect_kwargs or self.interactions_df is None:
+            self._detect(**detect_kwargs)
 
         palette = {k: list(v) for k, v in PML_COLORS.items()}
         if color is not None:
@@ -988,7 +991,7 @@ class PLI:
         :param figsize: Optional[tuple[float, float]]
             Optional Matplotlib figure size (width, height) in inches. Auto-scaled from layout dimensions when None.
         :param detect_kwargs: dict
-            Optional keyword arguments forwarded to PLI.detect() (forces re-detection when supplied). By
+            Optional keyword arguments forwarded to PLI._detect() (forces re-detection when supplied). By
             default, draw() shows H-bonds, hydrophobic contacts, and aromatic (pi-pi / cation-pi) interactions
             with include_ionic=False; pass include_ionic=True to display ionic/salt bridges.
         :return: Optional[matplotlib.figure.Figure]
@@ -996,9 +999,9 @@ class PLI:
         """
         draw_include_ionic = bool(detect_kwargs.get("include_ionic", False))
         if detect_kwargs:
-            self.detect(**{"include_ionic": False, **detect_kwargs})
+            self._detect(**{"include_ionic": False, **detect_kwargs})
         elif self.interactions_df is None:
-            self.detect(include_ionic=False)
+            self._detect(include_ionic=False)
 
         draw_records = [
             r
@@ -1186,7 +1189,7 @@ class PLI:
         fragments, explicit donor hydrogens, and hydrophobic contour splines).
         """
         if self.interactions_df is None:
-            self.detect()
+            self._detect()
 
         active_records = self._interaction_records if records is None else records
 
