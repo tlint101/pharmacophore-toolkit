@@ -1124,7 +1124,6 @@ class PLI:
 
     def view(
         self,
-        mol: Optional[Union[int, str]] = None,
         type: str = "jupyter",
         pocket_repr: str = "stick",
         protein_repr: Optional[str] = "cartoon",
@@ -1139,10 +1138,8 @@ class PLI:
     ):
         """
         Render an interactive 3D protein–ligand interaction view using py3Dmol (Jupyter) or 3Dmol.js (Marimo).
-        :param mol: Optional[Union[int, str]]
-            0-based index or molecule name specifying a single loaded ligand to display. When None (default),
-            renders a single-ligand view if 1 ligand is loaded or an interactive dropdown selector across all loaded
-            ligands if multiple ligands are present.
+        Automatically shows a dropdown molecule selector when multiple ligands are loaded, or renders directly when
+        a single ligand is loaded.
         :param type: str
             Notebook rendering backend: 'jupyter' (default) or 'marimo'.
         :param pocket_repr: str
@@ -1169,8 +1166,8 @@ class PLI:
         :param detect_kwargs: dict
             Optional keyword arguments forwarded to PLI._detect() (forces recomputation when supplied).
         :return:
-            Interactive py3Dmol viewer (or ipywidgets dropdown selector in Jupyter when multiple ligands are loaded)
-            or Marimo iframe widget.
+            Interactive py3Dmol viewer (when 1 ligand is loaded), None after displaying an ipywidgets dropdown in
+            Jupyter (when multiple ligands are loaded), or Marimo iframe widget.
         """
         backend = str(type).lower()
         if backend not in ("jupyter", "marimo"):
@@ -1215,13 +1212,12 @@ class PLI:
                 name=labels[idx],
             )
 
-        if mol is not None or len(self._ligand_entries) == 1:
-            target_idx = 0 if mol is None else self._resolve_ligand_index(mol)
+        if len(self._ligand_entries) == 1:
             if backend == "jupyter":
-                return _render_pli_jupyter(_build_payload(target_idx, include_pdb=True), window=win_size)
+                return _render_pli_jupyter(_build_payload(0, include_pdb=True), window=win_size)
             return _render_pli_marimo(
                 pdb_data=pdb_data,
-                lig_payloads=[_build_payload(target_idx, include_pdb=False)],
+                lig_payloads=[_build_payload(0, include_pdb=False)],
                 protein_repr=prot_norm,
                 pocket_repr=pocket_norm,
                 window=win_size,
@@ -1241,7 +1237,8 @@ class PLI:
             def _render_selected(index: int):
                 return _render_pli_jupyter(_build_payload(index, include_pdb=True), window=win_size)
 
-            return widgets.interact(_render_selected, index=dropdown)
+            widgets.interact(_render_selected, index=dropdown)
+            return
 
         prev_idx = self._active_idx
         try:
