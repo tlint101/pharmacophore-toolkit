@@ -102,17 +102,48 @@ WATER_RESIDUES = frozenset({"HOH", "WAT", "SOL", "DOD", "H2O"})
 
 METAL_RESIDUES = frozenset({"MG", "ZN", "MN", "FE", "CA", "CU", "CO", "NI", "NA", "K", "CD", "HG"})
 
+METAL_ATOMIC_NUMS = frozenset({11, 12, 19, 20, 25, 26, 27, 28, 29, 30, 48, 80})
+
 DEFAULT_POCKET_CUTOFF = 6.0
 
-# Default 3D interaction cutoffs (Å and degrees) for PLI.detect()
+# Default 3D interaction cutoffs (Å and degrees with relaxed offset pi-stacking)
 DEFAULT_HBOND_DIST = 3.5
+DEFAULT_HBOND_H_DIST = 2.8
 DEFAULT_HBOND_ANGLE = 120.0
+DEFAULT_HBOND_ACCEPTOR_ANGLE = 90.0
 DEFAULT_HBOND_HEAVY_ANGLE = 90.0
+DEFAULT_XBOND_DIST = 3.5
+DEFAULT_XBOND_DONOR_ANGLE = 120.0
+DEFAULT_XBOND_ACCEPTOR_ANGLE = 90.0
 DEFAULT_HYDROPHOBIC_DIST = 4.0
-DEFAULT_IONIC_DIST = 4.0
+DEFAULT_IONIC_DIST = 5.0
 DEFAULT_PI_STACKING_DIST = 5.5
-DEFAULT_CATION_PI_DIST = 5.0
+DEFAULT_PI_FACE_DIST = 5.0
+DEFAULT_PI_FACE_ANGLE = 40.0
+DEFAULT_PI_EDGE_ANGLE = 50.0
+DEFAULT_CATION_PI_DIST = 6.0
+DEFAULT_CATION_PI_ANGLE = 30.0
+DEFAULT_METAL_DIST = 2.8
+DEFAULT_VDW_TOLERANCE = 0.0
 DEFAULT_CLASH_DIST = 2.2
+
+PROLIF_INTERACTION_ORDER = (
+    "HBDonor",
+    "HBAcceptor",
+    "XBDonor",
+    "XBAcceptor",
+    "PiStacking",
+    "FaceToFace",
+    "EdgeToFace",
+    "CationPi",
+    "PiCation",
+    "Cationic",
+    "Anionic",
+    "MetalDonor",
+    "MetalAcceptor",
+    "Hydrophobic",
+    "VdWContact",
+)
 
 BACKBONE_ATOMS = frozenset({"N", "CA", "C", "O", "OXT"})
 
@@ -144,10 +175,10 @@ PROTEIN_NEG_ATOMS = {
 }
 
 PLI_COLORS = {
-    "HBond": (0.2549019607843137, 0.4117647058823529, 0.8823529411764706),          # royalblue (unified default)
-    "HBond_Donor": (0.2549019607843137, 0.4117647058823529, 0.8823529411764706),    # royalblue (when split_hbonds=True)
+    "HBond": (0.13333333333333333, 0.5450980392156862, 0.13333333333333333),        # forestgreen (unified default)
+    "HBond_Donor": (0.13333333333333333, 0.5450980392156862, 0.13333333333333333),  # forestgreen (when split_hbonds=True)
     "HBond_Acceptor": (1.0, 0.27058823529411763, 0.0),                              # orangered (when split_hbonds=True)
-    "Hydrophobic": (0.1803921568627451, 0.5450980392156862, 0.3411764705882353),    # seagreen
+    "Hydrophobic": (0.39215686274509803, 0.4549019607843137, 0.5450980392156862),   # slate gray (#64748B)
     "Pi_Stacking": (0.8549019607843137, 0.6470588235294118, 0.12549019607843137),   # goldenrod
     "Cation_Pi": (0.8549019607843137, 0.6470588235294118, 0.12549019607843137),     # goldenrod
     "Ionic": (0.7294117647058823, 0.3333333333333333, 0.8274509803921568),          # mediumorchid
