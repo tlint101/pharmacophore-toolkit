@@ -346,6 +346,11 @@ class View:
         self.labels = labels
         self.window = window
 
+        # skip dropdown when viewing a single molecule
+        if len(mol) == 1:
+            self._render(0)
+            return
+
         # dropdown menu
         import ipywidgets as widgets
         dropdown = widgets.Dropdown(
@@ -451,11 +456,12 @@ class View:
             })
 
         width, height = window
+        sel_style = ' style="display:none"' if len(data) <= 1 else ""
 
         html = f"""
         <script src="https://3Dmol.org/build/3Dmol-min.js"></script>
         <div style="font:13px sans-serif;display:flex;gap:8px;align-items:center;margin-bottom:8px">
-          <select id="sel"></select>
+          <select id="sel"{sel_style}></select>
           <select id="scale" title="Export resolution">
             <option value="1">1x</option><option value="2" selected>2x</option><option value="4">4x</option>
           </select>
