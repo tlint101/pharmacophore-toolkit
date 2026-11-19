@@ -3,6 +3,7 @@ Hold constant values
 """
 import os
 import matplotlib.colors as mcolors
+from rdkit import Chem
 from rdkit.Chem import AllChem, RDConfig
 from typing import Optional
 
@@ -70,6 +71,119 @@ def color_convert(color: Optional[str] = None):
         return rgb
     except:
         raise ValueError(f"{color} is not a valid color!")
+
+
+def is_hbond_acceptor_nitrogen(atom: Chem.Atom) -> bool:
+    """
+    Return True when a nitrogen atom can act as a hydrogen-bond acceptor (works with both explicit
+    and implicit hydrogens). Excludes positively charged/4-coordinate N, pyrrole/indole-like
+    aromatic [nX3], conjugated arylamines ([NX3]-a), and neutral amide/sulfonamide/phosphoramide/
+    amidine nitrogens while preserving deprotonated anions (e.g. sulfonamide [N-]), pyridines,
+    imines, nitriles, and neutral aliphatic amines.
+    :param atom: Chem.Atom
+        RDKit atom to inspect.
+    :return: bool
+        True if the atom is a valid hydrogen-bond acceptor nitrogen.
+    """
+    if atom.GetAtomicNum() != 7:
+        return False
+    chg = atom.GetFormalCharge()
+    if chg > 0:
+        return False
+    if chg < 0:
+        return True
+    total_deg = atom.GetTotalDegree()
+    if total_deg >= 4:
+        return False
+    if atom.GetIsAromatic():
+        return total_deg < 3
+    if total_deg == 3:
+        for bond in atom.GetBonds():
+            if bond.GetBondTypeAsDouble() != 1.0:
+                continue
+            nb = bond.GetOtherAtom(atom)
+            if nb.GetIsAromatic():
+                return False
+            if nb.GetAtomicNum() in (6, 15, 16) and any(
+                b.GetBondTypeAsDouble() == 2.0 and b.GetOtherAtom(nb).GetAtomicNum() in (7, 8, 16)
+                for b in nb.GetBonds()
+            ):
+                return False
+    return True
+
+
+def format_pymol_split_spheres_block(
+    split_specs: list[tuple[str, float, float, float, tuple[float, float, float], float, float]],
+    sphere_scale: Optional[float] = None,
+    transparency: float = 0.0,
+) -> str:
+    """
+    Generate a PyMOL python...python end CGO block rendering multi-color spherical
+    wedges for coincident pharmacophore features so PyMOL matches 3D View split spheres.
+    :param split_specs: list
+        Entries of (obj_name, x, y, z, (r, g, b), phi0, phi1).
+    :param sphere_scale: Optional[float]
+        Multiplier applied to PyMOL's pseudoatom base VdW radius (None uses 1.0x base VdW).
+    :param transparency: float
+        CGO transparency in [0.0, 1.0] (0.0 opaque).
+    :return: str
+        PyMOL python...python end script block, or '' when split_specs is empty.
+    """
+    if not split_specs:
+        return ""
+
+    scale_expr = f"_ph_base_r * {float(sphere_scale)}" if sphere_scale is not None else "_ph_base_r"
+    transp_val = round(float(transparency), 3)
+    lines = [
+        "python",
+        "import math as _math",
+        "from pymol import cmd as _cmd, cgo as _cgo",
+        "_ph_prev_az = _cmd.get('auto_zoom')",
+        "_cmd.set('auto_zoom', 0, quiet=1)",
+        "_cmd.pseudoatom('_ph_vdw_probe', pos=[0.0, 0.0, 0.0], quiet=1)",
+        "_ph_mdl = _cmd.get_model('_ph_vdw_probe')",
+        "_ph_base_r = float(_ph_mdl.atom[0].vdw) if (_ph_mdl.atom and float(_ph_mdl.atom[0].vdw) > 0) else 1.0",
+        "_cmd.delete('_ph_vdw_probe')",
+        "_cmd.set('auto_zoom', _ph_prev_az, quiet=1)",
+        f"_ph_r = {scale_expr}",
+        "def _ph_load_wedge(name, cx, cy, cz, r, rgb, phi0, phi1, transp):",
+        "    n_lat, n_lon = 20, 16",
+        "    stride = n_lon + 1",
+        "    verts, norms = [], []",
+        "    for i in range(n_lat + 1):",
+        "        th = _math.pi * i / n_lat",
+        "        st, ct = _math.sin(th), _math.cos(th)",
+        "        for j in range(n_lon + 1):",
+        "            ph = phi0 + (phi1 - phi0) * j / n_lon",
+        "            nx, ny, nz = st * _math.sin(ph), ct, st * _math.cos(ph)",
+        "            verts.append((cx + r * nx, cy + r * ny, cz + r * nz))",
+        "            norms.append((nx, ny, nz))",
+        "    obj = [_cgo.BEGIN, _cgo.TRIANGLES, _cgo.COLOR, rgb[0], rgb[1], rgb[2]]",
+        "    for i in range(n_lat):",
+        "        for j in range(n_lon):",
+        "            v00 = i * stride + j",
+        "            v10 = (i + 1) * stride + j",
+        "            v11 = (i + 1) * stride + (j + 1)",
+        "            v01 = i * stride + (j + 1)",
+        "            if i > 0:",
+        "                for k in (v00, v11, v01):",
+        "                    obj.extend([_cgo.NORMAL, *norms[k], _cgo.VERTEX, *verts[k]])",
+        "            if i < n_lat - 1:",
+        "                for k in (v00, v10, v11):",
+        "                    obj.extend([_cgo.NORMAL, *norms[k], _cgo.VERTEX, *verts[k]])",
+        "    obj.append(_cgo.END)",
+        "    _cmd.load_cgo(obj, name)",
+        "    if transp > 0.0:",
+        "        _cmd.set('cgo_transparency', transp, name)",
+    ]
+    for obj_name, x, y, z, rgb, phi0, phi1 in split_specs:
+        r_c, g_c, b_c = float(rgb[0]), float(rgb[1]), float(rgb[2])
+        lines.append(
+            f"_ph_load_wedge({obj_name!r}, {x:.5f}, {y:.5f}, {z:.5f}, _ph_r, "
+            f"({r_c:.4f}, {g_c:.4f}, {b_c:.4f}), {phi0:.6f}, {phi1:.6f}, {transp_val})"
+        )
+    lines.append("python end")
+    return "\n".join(lines) + "\n"
 
 
 # 3-letter amino acid codes

@@ -4,6 +4,7 @@ PyMOL .pml generation, structure-based pharmacophores, and protein-ligand intera
 """
 
 import io
+import math
 import os
 import re
 from typing import Optional, Union
@@ -61,6 +62,8 @@ from pharmacophore.constants import (
     STANDARD_AMINO_ACIDS,
     WATER_RESIDUES,
     color_convert,
+    format_pymol_split_spheres_block,
+    is_hbond_acceptor_nitrogen,
 )
 
 _POS_CHARGED_N_QUERY = Chem.MolFromSmarts("[#7;+;!$([N+]([O-]))]")
@@ -1048,17 +1051,42 @@ class PLI:
 
             if include_pharmacophore:
                 feats = self._to_pharmacophore()
+                coord_groups: dict[tuple[float, float, float], list[int]] = {}
+                for idx, (_, _, x, y, z) in enumerate(feats):
+                    key = (round(float(x), 3), round(float(y), 3), round(float(z), 3))
+                    coord_groups.setdefault(key, []).append(idx)
+
                 pharm_counts: dict[str, int] = {}
-                for fam, _, x, y, z in feats:
+                split_specs = []
+                for idx, (fam, _, x, y, z) in enumerate(feats):
                     pharm_counts[fam] = pharm_counts.get(fam, 0) + 1
                     obj_name = f"pli_pharm_{fam}_{pharm_counts[fam]}"
-                    f.write(f"pseudoatom {obj_name}, pos=[{x}, {y}, {z}]\n")
-                    f.write(f"show spheres, {obj_name}\n")
-                    f.write(f"hide nonbonded, {obj_name}\n")
-                    f.write(f"color pli_pharm_{fam.lower()}_color, {obj_name}\n")
-                    f.write(f"set sphere_scale, {sphere_size}, {obj_name}\n")
-                    f.write(f"set sphere_transparency, 0.25, {obj_name}\n\n")
+                    key = (round(float(x), 3), round(float(y), 3), round(float(z), 3))
+                    group = coord_groups[key]
+                    if len(group) == 1:
+                        f.write(f"pseudoatom {obj_name}, pos=[{x}, {y}, {z}]\n")
+                        f.write(f"show spheres, {obj_name}\n")
+                        f.write(f"hide nonbonded, {obj_name}\n")
+                        f.write(f"color pli_pharm_{fam.lower()}_color, {obj_name}\n")
+                        f.write(f"set sphere_scale, {sphere_size}, {obj_name}\n")
+                        f.write(f"set sphere_transparency, 0.25, {obj_name}\n\n")
+                    else:
+                        rank = group.index(idx)
+                        k = len(group)
+                        phi0 = 2.0 * math.pi * rank / k
+                        phi1 = 2.0 * math.pi * (rank + 1) / k
+                        rgb = tuple(FEATURE_COLORS.get(fam, (0.5, 0.5, 0.5)))
+                        split_specs.append((obj_name, float(x), float(y), float(z), rgb, phi0, phi1))
                     group_members.append(obj_name)
+
+                if split_specs:
+                    f.write(
+                        format_pymol_split_spheres_block(
+                            split_specs,
+                            sphere_scale=sphere_size,
+                            transparency=0.25,
+                        )
+                    )
 
             if group_members:
                 f.write(f"group pli_interactions, {' '.join(group_members)}\n")
@@ -1778,19 +1806,8 @@ class PLI:
 
                 if anum == 8 and chg <= 0:
                     acceptors.append((heavy_idx, full_idx))
-                elif anum == 7 and chg <= 0 and full_atom.GetTotalDegree() < 4:
-                    # Exclude non-accepting pyrrole-like, amide, or sulfonamide NH donors
-                    has_h = bool(explicit_hs) or heavy_atom.GetTotalNumHs() > 0
-                    attached_to_xo = any(
-                        nb.GetAtomicNum() in (6, 16)
-                        and any(
-                            b.GetBondTypeAsDouble() == 2.0 and b.GetOtherAtom(nb).GetAtomicNum() == 8
-                            for b in nb.GetBonds()
-                        )
-                        for nb in heavy_atom.GetNeighbors()
-                    )
-                    if not (has_h and (heavy_atom.GetIsAromatic() or attached_to_xo)):
-                        acceptors.append((heavy_idx, full_idx))
+                elif anum == 7 and is_hbond_acceptor_nitrogen(full_atom):
+                    acceptors.append((heavy_idx, full_idx))
                 elif anum == 16 and chg <= 0 and heavy_atom.GetDegree() <= 2:
                     acceptors.append((heavy_idx, full_idx))
 
@@ -1822,6 +1839,7 @@ class PLI:
             atom.GetIdx()
             for atom in lig_no_h.GetAtoms()
             if atom.GetFormalCharge() < 0
+            and not any(nb.GetFormalCharge() > 0 for nb in atom.GetNeighbors())
         }
         if _NEG_ACID_O_QUERY is not None:
             for match in lig_no_h.GetSubstructMatches(_NEG_ACID_O_QUERY):

@@ -9,6 +9,18 @@ from rdkit.Avalon import pyAvalonTools
 import matplotlib.colors as mcolors
 from typing import Optional, Union
 
+from pharmacophore.constants import is_hbond_acceptor_nitrogen
+
+
+def _cliff_atom_roles(atom: Chem.Atom) -> tuple[bool, bool]:
+    """Return (is_donor, is_acceptor) for a heavy cliff atom (handles explicit and implicit hydrogens)."""
+    symbol = atom.GetSymbol()
+    donor = symbol in ["N", "O", "S"] and atom.GetTotalNumHs(includeNeighbors=True) > 0
+    acceptor = (symbol == "O" and atom.GetFormalCharge() <= 0) or (
+        symbol == "N" and is_hbond_acceptor_nitrogen(atom)
+    )
+    return donor, acceptor
+
 
 class SAR:
     def __init__(self, data: pd.DataFrame, smi_col: str = "smiles", act_col: str = "activity", units: str = "nM",
@@ -283,12 +295,12 @@ class SAR:
             f.write("set_color Aromatic, [255, 235, 59]\n")
 
             # generate aromatic psudoatom points
+            conf = mol.GetConformer()
             aromatic_atom_indices = set()
             ring_info = mol.GetRingInfo()
             for x, ring in enumerate(ring_info.AtomRings()):
                 if all(mol.GetAtomWithIdx(idx).GetIsAromatic() for idx in ring):
                     if any(idx in flat_indices for idx in ring):
-                        conf = mol.GetConformer()
                         coords = [conf.GetAtomPosition(idx) for idx in ring]
                         centroid = np.mean(coords, axis=0)
 
@@ -308,10 +320,11 @@ class SAR:
             for idx in flat_indices:
                 atom = mol.GetAtomWithIdx(idx)
                 symbol = atom.GetSymbol()
+                if symbol == 'H':
+                    continue
                 pos = conf.GetAtomPosition(idx)
 
-                donor = symbol in ['N', 'O', 'S'] and atom.GetTotalNumHs() > 0
-                acceptor = symbol in ['N', 'O'] and atom.GetFormalCharge() <= 0
+                donor, acceptor = _cliff_atom_roles(atom)
 
                 color = None
                 label = ""
@@ -321,7 +334,7 @@ class SAR:
                     color, label = "HDonor", "Donor"
                 elif acceptor:
                     color, label = "HAcceptor", "Acceptor"
-                elif idx not in aromatic_atom_indices and symbol in ['C', 'Cl', 'Br', 'I']:
+                elif idx not in aromatic_atom_indices and symbol in ['C', 'F', 'Cl', 'Br', 'I']:
                     color, label = "Hydrophob", "Hydrophobic"
 
                 if color:
@@ -416,12 +429,11 @@ class SAR:
         for idx in flat_indices:
             atom = mol.GetAtomWithIdx(idx)
             symbol = atom.GetSymbol()
+            if symbol == 'H':
+                continue
 
             # tag donor/acceptor
-            donor = symbol in ['N', 'O', 'S'] and atom.GetTotalNumHs() > 0
-            acceptor = symbol in ['N', 'O'] and atom.GetFormalCharge() <= 0
-            # use if halogens are listed as acceptors
-            # acceptor = symbol in ['N', 'O', 'F', 'Cl', 'Br', 'I'] and atom.GetFormalCharge() <= 0
+            donor, acceptor = _cliff_atom_roles(atom)
 
             # set color var
             color = None
