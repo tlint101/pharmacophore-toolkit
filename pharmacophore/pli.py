@@ -5,8 +5,10 @@ PyMOL .pml generation, structure-based pharmacophores, and protein-ligand intera
 
 import io
 import os
+import re
 from typing import Optional, Union
 import contourpy
+from matplotlib.colors import BoundaryNorm, ListedColormap
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
@@ -49,6 +51,7 @@ from pharmacophore.constants import (
     METAL_RESIDUES,
     PLI_COLORS,
     PML_COLORS,
+    PROLIG_COLORS,
     PROLIG_DEFAULT_INTERACTIONS,
     PROLIG_INTERACTION_ORDER,
     PROTEIN_AROMATIC_RESIDUES,
@@ -612,6 +615,213 @@ class PLI:
             df[col] = df[col].astype(int)
         return df
 
+    def plot_barcode(
+        self,
+        df: Optional[pd.DataFrame] = None,
+        group_by: str = "interaction",
+        show_counts: bool = False,
+        legend: bool = True,
+        color: Optional[dict] = None,
+        xlabel: Optional[str] = None,
+        dpi: int = 300,
+        show: bool = True,
+        savepath: Optional[str] = None,
+        figsize: Optional[tuple[float, float]] = None,
+        **to_df_kwargs,
+    ):
+        """
+        Render a categorical protein–ligand interaction fingerprint barcode plot using Matplotlib.
+        :param df: Optional[pd.DataFrame]
+            Optional interaction count DataFrame produced by PLI.to_df(). When None (default), computed internally
+            via self.to_df(**to_df_kwargs).
+        :param group_by: str
+            How Y-axis rows are grouped: 'interaction' (default, matches PLI.to_df() column order grouped by
+            PROLIG_INTERACTION_ORDER with dividers between interaction types) or 'residue' (stacks interactions
+            by residue in sequence order with dividers between residues).
+        :param show_counts: bool
+            If True, overlay integer contact counts centered inside occupied barcode cells. Defaults to False.
+        :param legend: bool
+            Whether to draw a compact interaction color legend to the right of the plot. Defaults to True.
+        :param color: Optional[dict]
+            Optional dictionary overriding default PROLIG_COLORS entries by interaction type (e.g.,
+            {'HBDonor': '#1E40AF', 'Hydrophobic': '#2E8B57'}).
+        :param xlabel: Optional[str]
+            Optional X-axis title displayed below the molecule/pose labels.
+        :param dpi: int
+            Output resolution in dots per inch when saving raster figures. Defaults to 300.
+        :param show: bool
+            If True (default), calls plt.show() for inline display and returns None. If False, returns the
+            Matplotlib Figure object.
+        :param savepath: Optional[str]
+            Optional output file path (.png, .svg, or any Matplotlib-supported vector/raster format).
+        :param figsize: Optional[tuple[float, float]]
+            Optional Matplotlib figure size (width, height) in inches. Auto-scaled from table dimensions when None.
+        :param to_df_kwargs: dict
+            Optional keyword arguments forwarded to PLI.to_df() when df is None (e.g., ligands='all',
+            interactions='all', count='pairs').
+        :return: Optional[matplotlib.figure.Figure]
+            Returns the Matplotlib Figure when show=False, otherwise None.
+        """
+        if group_by not in ("residue", "interaction"):
+            raise ValueError(f"Invalid group_by={group_by!r}. Expected 'residue' or 'interaction'.")
+
+        if figsize is not None:
+            if (
+                not isinstance(figsize, (tuple, list))
+                or len(figsize) != 2
+                or float(figsize[0]) <= 0
+                or float(figsize[1]) <= 0
+            ):
+                raise ValueError(f"figsize must be a (width, height) tuple of positive numbers, got {figsize!r}.")
+            plot_figsize = (float(figsize[0]), float(figsize[1]))
+        else:
+            plot_figsize = None
+
+        if df is None:
+            df = self.to_df(**to_df_kwargs)
+        else:
+            if to_df_kwargs:
+                raise ValueError("Cannot specify both df and to_df keyword arguments.")
+            if not isinstance(df, pd.DataFrame):
+                raise TypeError("df must be a pandas DataFrame.")
+
+        palette = _resolve_color_palette(PROLIG_COLORS, color)
+        mol_labels = df["mol_name"].astype(str).tolist() if "mol_name" in df.columns else [str(i) for i in df.index]
+        parsed, ytick_pos, ytick_labels, dividers = _prepare_barcode_rows(df, group_by)
+
+        n_mols = len(df)
+        n_rows = len(parsed)
+        counts = (
+            np.nan_to_num(df[[col for col, _, _ in parsed]].to_numpy(dtype=float).T, nan=0.0)
+            if n_mols > 0 and n_rows > 0
+            else np.empty((0, 0), dtype=float)
+        )
+
+        if n_mols == 0 or n_rows == 0 or not np.any(counts > 0):
+            fig, ax = plt.subplots(figsize=plot_figsize or (5.0, 2.5), dpi=150)
+            fig.patch.set_facecolor("white")
+            ax.set_facecolor("white")
+            ax.text(0.5, 0.5, "No interactions detected", ha="center", va="center", fontsize=11, color="#475569")
+            ax.axis("off")
+            return _finalize_matplotlib_figure(fig, savepath=savepath, dpi=dpi, show=show)
+
+        present_set = {parsed[r][1] for r in range(n_rows) if np.any(counts[r] > 0)}
+        present_interactions = [it for it in PROLIG_INTERACTION_ORDER if it in present_set]
+        for _, itype, _ in parsed:
+            if itype in present_set and itype not in present_interactions:
+                present_interactions.append(itype)
+
+        cat_id = {itype: idx + 1 for idx, itype in enumerate(present_interactions)}
+        z_mat = np.zeros((n_rows, n_mols), dtype=int)
+        for r, (_, itype, _) in enumerate(parsed):
+            cid = cat_id.get(itype)
+            if cid is not None:
+                z_mat[r, counts[r] > 0] = cid
+
+        cmap = ListedColormap(
+            [(1.0, 1.0, 1.0)] + [palette.get(it, (0.45, 0.45, 0.45)) for it in present_interactions]
+        )
+        norm = BoundaryNorm(np.arange(-0.5, len(present_interactions) + 1.5, 1.0), cmap.N)
+
+        if plot_figsize is None:
+            height = max(2.8, min(18.0, 0.30 * n_rows + 1.2))
+            base_w = max(2.4, min(14.0, 0.70 * n_mols + 1.2))
+            legend_pad = 1.8 if legend else 0.4
+            plot_figsize = (base_w + legend_pad, height)
+
+        fig, ax = plt.subplots(figsize=plot_figsize, dpi=150)
+        fig.patch.set_facecolor("white")
+        ax.set_facecolor("white")
+
+        ax.pcolormesh(
+            np.arange(n_mols + 1),
+            np.arange(n_rows + 1),
+            z_mat,
+            cmap=cmap,
+            norm=norm,
+            edgecolors="white",
+            linewidth=0.8,
+            shading="flat",
+        )
+        ax.set_xlim(0.0, float(n_mols))
+        ax.set_ylim(float(n_rows), 0.0)
+
+        for div_y in dividers:
+            ax.axhline(y=div_y, color="#94A3B8", linewidth=0.9, zorder=3)
+
+        ax.set_yticks(ytick_pos)
+        ax.set_yticklabels(ytick_labels, fontsize=8.5, color="#1E293B")
+        ax.tick_params(axis="y", length=0, pad=6)
+
+        max_lbl_len = max((len(lbl) for lbl in mol_labels), default=0)
+        if n_mols <= 5 and max_lbl_len <= 14:
+            x_rot, x_ha, rot_mode = 0, "center", "default"
+        elif n_mols <= 30:
+            x_rot, x_ha, rot_mode = 45, "right", "anchor"
+        else:
+            x_rot, x_ha, rot_mode = 90, "center", "default"
+
+        ax.set_xticks(np.arange(n_mols, dtype=float) + 0.5)
+        tick_kw = {"fontsize": 8.5, "color": "#1E293B", "rotation": x_rot, "ha": x_ha}
+        if rot_mode == "anchor":
+            tick_kw["rotation_mode"] = "anchor"
+        ax.set_xticklabels(mol_labels, **tick_kw)
+        ax.tick_params(axis="x", length=3, color="#CBD5E1", pad=4)
+
+        for spine in ax.spines.values():
+            spine.set_edgecolor("#CBD5E1")
+            spine.set_linewidth(0.8)
+
+        if xlabel:
+            ax.set_xlabel(str(xlabel), fontsize=9.5, color="#1E293B", labelpad=6)
+
+        if show_counts:
+            for r in range(n_rows):
+                rgb = palette.get(parsed[r][1], (0.45, 0.45, 0.45))
+                lum = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
+                txt_color = "#1E293B" if lum > 0.62 else "#FFFFFF"
+                for c in range(n_mols):
+                    val = counts[r, c]
+                    if val > 0:
+                        ax.text(
+                            c + 0.5,
+                            r + 0.5,
+                            f"{int(round(val))}",
+                            ha="center",
+                            va="center",
+                            fontsize=7.8,
+                            fontweight="normal",
+                            color=txt_color,
+                            zorder=4,
+                        )
+
+        if legend and present_interactions:
+            handles = [
+                patches.Patch(
+                    facecolor=palette.get(it, (0.45, 0.45, 0.45)),
+                    edgecolor="#94A3B8",
+                    linewidth=0.5,
+                    label=it,
+                )
+                for it in present_interactions
+            ]
+            ax.legend(
+                handles=handles,
+                bbox_to_anchor=(1.02, 1.0),
+                loc="upper left",
+                borderaxespad=0.0,
+                frameon=True,
+                facecolor="white",
+                edgecolor="#CBD5E1",
+                framealpha=0.95,
+                fontsize=8.5,
+                title="Interaction",
+                title_fontsize=9.0,
+            )
+
+        fig.tight_layout()
+        return _finalize_matplotlib_figure(fig, savepath=savepath, dpi=dpi, show=show)
+
     def _to_pharmacophore(self, **detect_kwargs) -> list:
         """
         Internal helper to convert detected 3D protein–ligand interactions into pharmacophore-toolkit's
@@ -1009,15 +1219,7 @@ class PLI:
             if draw_include_ionic or r["interaction_type"] != "Ionic"
         ]
 
-        palette = {k: tuple(v) for k, v in PLI_COLORS.items()}
-        if color is not None:
-            if not isinstance(color, dict):
-                raise ValueError("color must be a dictionary mapping interaction types to colors.")
-            for key, val in color.items():
-                if isinstance(val, (tuple, list)) and len(val) in (3, 4):
-                    palette[key] = tuple(float(c) for c in val[:3])
-                else:
-                    palette[key] = tuple(color_convert(val))
+        palette = _resolve_color_palette(PLI_COLORS, color)
 
         if show_chain == "auto":
             chains = {r["chain"] for r in draw_records if r.get("chain")}
@@ -1164,19 +1366,7 @@ class PLI:
         if legend and present_types:
             _draw_pli_legend(ax, present_types, palette)
 
-        if savepath is not None:
-            savepath_str = str(savepath).strip()
-            if not savepath_str:
-                raise ValueError("savepath must be a non-empty file path when provided.")
-            parent_dir = os.path.dirname(savepath_str)
-            if parent_dir:
-                os.makedirs(parent_dir, exist_ok=True)
-            fig.savefig(savepath_str, dpi=dpi, bbox_inches="tight", pad_inches=0.1, facecolor="white")
-
-        if show:
-            plt.show()
-            return None
-        return fig
+        return _finalize_matplotlib_figure(fig, savepath=savepath, dpi=dpi, show=show)
 
     def _layout_poseview_scene(
         self,
@@ -2482,11 +2672,116 @@ def _is_protein_hydrophobic_atom(res: dict, atom_name: str, p_atom: Chem.Atom) -
     return False
 
 
+_RES_TAG_RE = re.compile(r"^([A-Za-z][A-Za-z0-9]*?)(-?\d+)([A-Za-z]*)$")
+
+
+def _parse_residue_tag_sort_key(res_tag: str) -> tuple:
+    """Parse '<RES><NUM>[CHAIN]' into a sequence-ordered sort key."""
+    match = _RES_TAG_RE.match(str(res_tag))
+    if not match:
+        return (float("inf"), "", str(res_tag), str(res_tag))
+    res_name, res_num_str, suffix = match.groups()
+    return (int(res_num_str), suffix, res_name, str(res_tag))
+
+
+def _resolve_color_palette(base_palette: dict, color: Optional[dict]) -> dict[str, tuple[float, float, float]]:
+    """Copy base_palette and apply optional RGB tuple or hex/named color overrides."""
+    palette = {k: tuple(float(c) for c in v[:3]) for k, v in base_palette.items()}
+    if color is None:
+        return palette
+    if not isinstance(color, dict):
+        raise ValueError("color must be a dictionary mapping interaction types to colors.")
+    for key, val in color.items():
+        if isinstance(val, (tuple, list)) and len(val) in (3, 4):
+            palette[key] = tuple(float(c) for c in val[:3])
+        else:
+            palette[key] = tuple(color_convert(val))
+    return palette
+
+
+def _finalize_matplotlib_figure(
+    fig,
+    savepath: Optional[str],
+    dpi: int,
+    show: bool,
+):
+    """Save a Matplotlib figure when savepath is set and either display or return it."""
+    if savepath is not None:
+        savepath_str = str(savepath).strip()
+        if not savepath_str:
+            raise ValueError("savepath must be a non-empty file path when provided.")
+        parent_dir = os.path.dirname(savepath_str)
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+        fig.savefig(savepath_str, dpi=dpi, bbox_inches="tight", pad_inches=0.1, facecolor="white")
+
+    if show:
+        plt.show()
+        return None
+    return fig
+
+
 def _format_table_residue_tag(res_entry: dict, include_chain: bool) -> str:
     """Format an uppercase 3-letter residue header tag such as 'ASP173' or 'ASP173A'."""
     ch = res_entry["chain"] if (include_chain and res_entry["chain"]) else ""
     ins = res_entry.get("insertion_code", "")
     return f"{res_entry['residue_name']}{res_entry['residue_number']}{ins}{ch}"
+
+
+def _prepare_barcode_rows(
+    df: pd.DataFrame,
+    group_by: str,
+) -> tuple[list[tuple[str, str, str]], list[float], list[str], list[float]]:
+    """Parse, sort, and compute Y-axis tick centers and divider lines for PLI.plot_barcode()."""
+    raw_cols = [c for c in df.columns if c not in ("mol_name", "smiles")]
+    parsed: list[tuple[str, str, str]] = []
+    for col in raw_cols:
+        col_str = str(col)
+        if "_" in col_str:
+            itype, res_tag = col_str.split("_", 1)
+        else:
+            itype, res_tag = col_str, col_str
+        parsed.append((col, itype, res_tag))
+
+    if not parsed:
+        return [], [], [], []
+
+    order_map = {name: i for i, name in enumerate(PROLIG_INTERACTION_ORDER)}
+    if group_by == "residue":
+        parsed.sort(
+            key=lambda item: (
+                _parse_residue_tag_sort_key(item[2]),
+                order_map.get(item[1], len(order_map)),
+                item[1],
+            )
+        )
+        ytick_pos: list[float] = []
+        ytick_labels: list[str] = []
+        dividers: list[float] = []
+        start = 0
+        while start < len(parsed):
+            tag = parsed[start][2]
+            end = start + 1
+            while end < len(parsed) and parsed[end][2] == tag:
+                end += 1
+            ytick_pos.append(0.5 * (start + end))
+            ytick_labels.append(tag)
+            if end < len(parsed):
+                dividers.append(float(end))
+            start = end
+        return parsed, ytick_pos, ytick_labels, dividers
+
+    parsed.sort(
+        key=lambda item: (
+            order_map.get(item[1], len(order_map)),
+            item[1],
+            _parse_residue_tag_sort_key(item[2]),
+        )
+    )
+    ytick_pos = [r + 0.5 for r in range(len(parsed))]
+    ytick_labels = [item[2] for item in parsed]
+    dividers = [float(r) for r in range(1, len(parsed)) if parsed[r][1] != parsed[r - 1][1]]
+    return parsed, ytick_pos, ytick_labels, dividers
 
 
 def _protein_hbond_role(
