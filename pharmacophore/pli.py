@@ -95,8 +95,7 @@ class PLI:
     def __init__(
         self,
         protein: str,
-        ligand: Union[str, os.PathLike, Chem.Mol],
-        pose_idx: int = 0,
+        ligand: Union[str, os.PathLike, Chem.Mol, list[Chem.Mol], tuple[Chem.Mol, ...]],
         pocket_cutoff: float = DEFAULT_POCKET_CUTOFF,
         keep_waters: bool = False,
         keep_metals: bool = True,
@@ -110,11 +109,10 @@ class PLI:
         specified using "add_hs".
         :param protein: str
             File path to the receptor structure in ``.pdb`` format.
-        :param ligand: Union[str, os.PathLike, Chem.Mol]
-            File path to a single- or multi-molecule 3D ligand ``.sdf`` file, or an in-memory RDKit ``Chem.Mol``.
-        :param pose_idx: int
-            Zero-based pose index loaded as the active ligand when ``ligand`` is a multi-molecule ``.sdf`` file.
-            Defaults to ``0``.
+        :param ligand: Union[str, os.PathLike, Chem.Mol, list[Chem.Mol], tuple[Chem.Mol, ...]]
+            File path to a single- or multi-molecule 3D ligand ``.sdf`` file, an in-memory RDKit ``Chem.Mol``, or
+            a non-empty sequence of 3D ``Chem.Mol`` objects. All loaded ligands are stored and scored by default in
+            ``to_df()`` and ``plot_barcode()``.
         :param pocket_cutoff: float
             Heavy-atom distance cutoff in Ångströms used to define the binding pocket. Defaults to ``6.0``.
         :param keep_waters: bool
@@ -129,29 +127,75 @@ class PLI:
 
         self.protein_pdb = str(protein)
         self.ligand_source = ligand
-        self.pose_idx = pose_idx
         self.pocket_cutoff = float(pocket_cutoff)
         self.keep_waters = bool(keep_waters)
         self.keep_metals = bool(keep_metals)
         self.add_hs = bool(add_hs)
 
         self.protein = _load_protein(self.protein_pdb, add_hs=self.add_hs)
-        self.ligand = _load_ligand(
-            ligand,
-            pose_idx=self.pose_idx,
-            add_hs=self.add_hs,
-        )
-        (
-            self.ligand_no_h,
-            self.full_to_heavy_idx,
-            self.heavy_to_full_idx,
-        ) = _build_heavy_atom_map(self.ligand)
-
         self._receptor_index = self._index_receptor_residues()
-        self.pocket_residues = self._extract_pocket_residues()
-        self._interaction_records = []
-        self.interactions_df = None
-        self.features_list = None
+
+        loaded_mols = _load_ligands(ligand, add_hs=self.add_hs)
+        single_ligand = len(loaded_mols) == 1
+        entries: list[dict] = []
+        for idx, mol_full in enumerate(loaded_mols):
+            mol_no_h, f2h, h2f = _build_heavy_atom_map(mol_full)
+            pocket_res = self._extract_pocket_residues(
+                mol_no_h, validate_alignment=single_ligand
+            )
+            prop_name = mol_full.GetProp("_Name").strip() if mol_full.HasProp("_Name") else ""
+            entries.append(
+                {
+                    "name": prop_name or f"Mol_{idx}",
+                    "ligand": mol_full,
+                    "ligand_no_h": mol_no_h,
+                    "full_to_heavy_idx": f2h,
+                    "heavy_to_full_idx": h2f,
+                    "pocket_residues": pocket_res,
+                }
+            )
+
+        if not single_ligand and not any(e["pocket_residues"] for e in entries):
+            self._extract_pocket_residues(entries[0]["ligand_no_h"], validate_alignment=True)
+
+        self._ligand_entries = entries
+        self.ligands = [e["ligand"] for e in entries]
+        self.mol_names = [e["name"] for e in entries]
+        self._active_idx = -1
+        self._select_ligand(0)
+
+    def _resolve_ligand_index(self, mol: Union[int, str] = 0) -> int:
+        """Resolve a 0-based index or molecule name into a validated ligand entry index."""
+        n_ligs = len(self._ligand_entries)
+        if isinstance(mol, int) and not isinstance(mol, bool):
+            idx = mol if mol >= 0 else n_ligs + mol
+            if idx < 0 or idx >= n_ligs:
+                raise IndexError(f"mol={mol} out of range for {n_ligs} loaded ligand(s).")
+            return idx
+        if isinstance(mol, str):
+            if mol in self.mol_names:
+                return self.mol_names.index(mol)
+            lower_map = {name.lower(): i for i, name in enumerate(self.mol_names)}
+            if mol.lower() in lower_map:
+                return lower_map[mol.lower()]
+            raise KeyError(f"Ligand {mol!r} not found. Available ligands: {self.mol_names}")
+        raise TypeError("mol must be a 0-based integer index or a molecule name string.")
+
+    def _select_ligand(self, mol: Union[int, str] = 0) -> int:
+        """Bind active single-ligand attributes and reset cached contact state when switching ligands."""
+        idx = self._resolve_ligand_index(mol)
+        if idx != self._active_idx:
+            entry = self._ligand_entries[idx]
+            self.ligand = entry["ligand"]
+            self.ligand_no_h = entry["ligand_no_h"]
+            self.full_to_heavy_idx = entry["full_to_heavy_idx"]
+            self.heavy_to_full_idx = entry["heavy_to_full_idx"]
+            self.pocket_residues = entry["pocket_residues"]
+            self._active_idx = idx
+            self._interaction_records = []
+            self.interactions_df = None
+            self.features_list = None
+        return idx
 
     def _index_receptor_residues(self) -> dict:
         """
@@ -278,13 +322,16 @@ class PLI:
 
         return pocket_list
 
-    def pocket_summary(self) -> pd.DataFrame:
+    def pocket_summary(self, mol: Union[int, str] = 0) -> pd.DataFrame:
         """
-        Return a summary DataFrame of all receptor residues within pocket_cutoff of the ligand.
+        Return a summary DataFrame of all receptor residues within pocket_cutoff of the selected ligand.
+        :param mol: Union[int, str]
+            0-based index or molecule name specifying which loaded ligand to summarize. Defaults to ``0``.
         :return: pd.DataFrame
             Columns: residue_name, pdb_residue_name, residue_number, chain, min_distance, num_heavy_atoms,
             is_water, is_metal.
         """
+        entry = self._ligand_entries[self._resolve_ligand_index(mol)]
         rows = [
             {
                 "residue_name": r["residue_name"],
@@ -296,7 +343,7 @@ class PLI:
                 "is_water": r["is_water"],
                 "is_metal": r["is_metal"],
             }
-            for r in self.pocket_residues
+            for r in entry["pocket_residues"]
         ]
         return pd.DataFrame(
             rows,
@@ -403,7 +450,6 @@ class PLI:
 
     def to_df(
         self,
-        ligands: Optional[Union[str, os.PathLike, Chem.Mol, list[Chem.Mol]]] = None,
         mol_names: Optional[list[str]] = None,
         interactions: Union[str, list[str]] = "default",
         count: Union[str, bool] = "ligand",
@@ -412,13 +458,10 @@ class PLI:
         **cutoffs,
     ) -> pd.DataFrame:
         """
-        Generate a protein–ligand interaction count table across one or more ligand poses.
-        :param ligands: Optional[Union[str, os.PathLike, Chem.Mol, list[Chem.Mol]]]
-            Ligand(s) to score against the loaded receptor. Defaults to None (uses self.ligand). Pass 'all' to
-            score every record in self.ligand_source, another .sdf path, a Chem.Mol, or a list of Chem.Mol poses.
+        Generate a protein–ligand interaction count table across all loaded ligands.
         :param mol_names: Optional[list[str]]
-            Optional display names corresponding to each ligand row. When None, uses each molecule's '_Name'
-            property or falls back to 'Mol_0', 'Mol_1', ...
+            Optional display names corresponding to each loaded ligand row. When None, uses each molecule's
+            ``_Name`` property or falls back to ``'Mol_0'``, ``'Mol_1'``, ...
         :param interactions: Union[str, list[str]]
             Interaction types to compute: 'default' (HBDonor, HBAcceptor, PiStacking, Hydrophobic, VdWContact),
             'all' (all supported classes with PiStacking combined), or an explicit list of interaction
@@ -503,46 +546,25 @@ class PLI:
         for key, val in cutoffs.items():
             resolved_cutoffs[key] = float(val)
 
-        if ligands is None:
-            batch_entries = [
-                (
-                    self.ligand,
-                    self.ligand_no_h,
-                    self.heavy_to_full_idx,
-                    self.pocket_residues,
-                )
-            ]
-        else:
-            raw_mols = _load_ligand_batch(
-                ligands,
-                fallback_source=self.ligand_source,
-                default_mol=self.ligand,
-                add_hs=self.add_hs,
-            )
-            batch_entries = []
-            for mol_full in raw_mols:
-                mol_no_h, _, h2f = _build_heavy_atom_map(mol_full)
-                pocket_res = self._extract_pocket_residues(mol_no_h, validate_alignment=False)
-                batch_entries.append((mol_full, mol_no_h, h2f, pocket_res))
-
         if mol_names is not None:
             names_list = [str(n) for n in mol_names]
-            if len(names_list) != len(batch_entries):
+            if len(names_list) != len(self._ligand_entries):
                 raise ValueError(
-                    f"Length of mol_names ({len(names_list)}) must match number of ligands ({len(batch_entries)})."
+                    f"Length of mol_names ({len(names_list)}) must match number of ligands ({len(self._ligand_entries)})."
                 )
         else:
-            names_list = []
-            for idx, (mol_full, _, _, _) in enumerate(batch_entries):
-                prop_name = mol_full.GetProp("_Name").strip() if mol_full.HasProp("_Name") else ""
-                names_list.append(prop_name or f"Mol_{idx}")
+            names_list = list(self.mol_names)
 
         per_mol_hits: list[dict[tuple[str, tuple], int]] = []
         per_mol_meta: list[tuple[str, str]] = []
         res_meta: dict[tuple, dict] = {}
         active_pairs: set[tuple[str, tuple]] = set()
 
-        for mol_name, (mol_full, mol_no_h, h2f, pocket_res) in zip(names_list, batch_entries):
+        for mol_name, entry in zip(names_list, self._ligand_entries):
+            mol_full = entry["ligand"]
+            mol_no_h = entry["ligand_no_h"]
+            h2f = entry["heavy_to_full_idx"]
+            pocket_res = entry["pocket_residues"]
             smiles = Chem.MolToSmiles(mol_no_h)
             per_mol_meta.append((mol_name, smiles))
             for r in pocket_res:
@@ -659,8 +681,8 @@ class PLI:
         :param figsize: Optional[tuple[float, float]]
             Optional Matplotlib figure size (width, height) in inches. Auto-scaled from table dimensions when None.
         :param to_df_kwargs: dict
-            Optional keyword arguments forwarded to PLI.to_df() when df is None (e.g., ligands='all',
-            interactions='all', count='pairs').
+            Optional keyword arguments forwarded to PLI.to_df() when df is None (e.g., interactions='all',
+            count='pairs'). When df is None, all loaded ligands are plotted automatically.
         :return: Optional[matplotlib.figure.Figure]
             Returns the Matplotlib Figure when show=False, otherwise None.
         """
@@ -899,6 +921,7 @@ class PLI:
     def output_pli(
         self,
         savepath: str,
+        mol: Union[int, str] = 0,
         pocket_repr: Optional[str] = "lines",
         show_labels: bool = False,
         split_hbonds: bool = False,
@@ -915,6 +938,8 @@ class PLI:
         Write a drag-and-drop PyMOL (.pml) visualization script for the detected protein–ligand interactions.
         :param savepath: str
             Output file path ending in .pml.
+        :param mol: Union[int, str]
+            0-based index or molecule name specifying which loaded ligand to export. Defaults to ``0``.
         :param pocket_repr: Optional[str]
             PyMOL representation for interacting pocket residues ('lines' default, 'sticks', or None to omit).
         :param show_labels: bool
@@ -952,6 +977,7 @@ class PLI:
                 f"Invalid pocket_repr={pocket_repr!r}. Only 'lines', 'sticks', or None are supported."
             )
 
+        self._select_ligand(mol)
         if detect_kwargs or self.interactions_df is None:
             self._detect(**detect_kwargs)
 
@@ -1098,6 +1124,7 @@ class PLI:
 
     def view(
         self,
+        mol: Optional[Union[int, str]] = None,
         type: str = "jupyter",
         pocket_repr: str = "stick",
         protein_repr: Optional[str] = "cartoon",
@@ -1112,6 +1139,10 @@ class PLI:
     ):
         """
         Render an interactive 3D protein–ligand interaction view using py3Dmol (Jupyter) or 3Dmol.js (Marimo).
+        :param mol: Optional[Union[int, str]]
+            0-based index or molecule name specifying a single loaded ligand to display. When None (default),
+            renders a single-ligand view if 1 ligand is loaded or an interactive dropdown selector across all loaded
+            ligands if multiple ligands are present.
         :param type: str
             Notebook rendering backend: 'jupyter' (default) or 'marimo'.
         :param pocket_repr: str
@@ -1138,7 +1169,8 @@ class PLI:
         :param detect_kwargs: dict
             Optional keyword arguments forwarded to PLI._detect() (forces recomputation when supplied).
         :return:
-            Interactive py3Dmol viewer display (Jupyter) or Marimo iframe widget.
+            Interactive py3Dmol viewer (or ipywidgets dropdown selector in Jupyter when multiple ligands are loaded)
+            or Marimo iframe widget.
         """
         backend = str(type).lower()
         if backend not in ("jupyter", "marimo"):
@@ -1161,23 +1193,73 @@ class PLI:
             raise ValueError(f"window must be a (width, height) tuple of positive integers, got {window!r}.")
         win_size = (int(window[0]), int(window[1]))
 
-        if detect_kwargs or self.interactions_df is None:
-            self._detect(**detect_kwargs)
+        with open(self.protein_pdb, "r") as f:
+            pdb_data = f.read()
+        labels = _dropdown_labels(self.mol_names)
 
-        payload = _prepare_view_payload(
-            pli=self,
-            pocket_repr=pocket_norm,
-            protein_repr=prot_norm,
-            show_labels=show_labels,
-            show_distances=show_distances,
-            split_hbonds=split_hbonds,
-            include_pharmacophore=include_pharmacophore,
-            color=color,
-        )
+        def _build_payload(idx: int, include_pdb: bool = True) -> dict:
+            self._select_ligand(idx)
+            if detect_kwargs or self.interactions_df is None:
+                self._detect(**detect_kwargs)
+            return _prepare_view_payload(
+                pli=self,
+                pocket_repr=pocket_norm,
+                protein_repr=prot_norm,
+                show_labels=show_labels,
+                show_distances=show_distances,
+                split_hbonds=split_hbonds,
+                include_pharmacophore=include_pharmacophore,
+                color=color,
+                pdb_data=pdb_data if include_pdb else None,
+                include_pdb=include_pdb,
+                name=labels[idx],
+            )
+
+        if mol is not None or len(self._ligand_entries) == 1:
+            target_idx = 0 if mol is None else self._resolve_ligand_index(mol)
+            if backend == "jupyter":
+                return _render_pli_jupyter(_build_payload(target_idx, include_pdb=True), window=win_size)
+            return _render_pli_marimo(
+                pdb_data=pdb_data,
+                lig_payloads=[_build_payload(target_idx, include_pdb=False)],
+                protein_repr=prot_norm,
+                pocket_repr=pocket_norm,
+                window=win_size,
+                prefix=prefix,
+            )
 
         if backend == "jupyter":
-            return _render_pli_jupyter(payload, window=win_size)
-        return _render_pli_marimo(payload, window=win_size, prefix=prefix)
+            import ipywidgets as widgets
+
+            dropdown = widgets.Dropdown(
+                options=[(lbl, i) for i, lbl in enumerate(labels)],
+                value=0,
+                description="Select:",
+                style={"description_width": "initial"},
+            )
+
+            def _render_selected(index: int):
+                return _render_pli_jupyter(_build_payload(index, include_pdb=True), window=win_size)
+
+            return widgets.interact(_render_selected, index=dropdown)
+
+        prev_idx = self._active_idx
+        try:
+            lig_payloads = [
+                _build_payload(idx, include_pdb=False)
+                for idx in range(len(self._ligand_entries))
+            ]
+        finally:
+            if prev_idx >= 0:
+                self._select_ligand(prev_idx)
+        return _render_pli_marimo(
+            pdb_data=pdb_data,
+            lig_payloads=lig_payloads,
+            protein_repr=prot_norm,
+            pocket_repr=pocket_norm,
+            window=win_size,
+            prefix=prefix,
+        )
 
     def _prepare_2d_ligand(
         self,
@@ -1272,6 +1354,7 @@ class PLI:
 
     def draw(
         self,
+        mol: Union[int, str] = 0,
         show_chain: Union[bool, str] = True,
         show_distances: bool = False,
         split_hbonds: bool = False,
@@ -1286,6 +1369,8 @@ class PLI:
     ):
         """
         Render a 2D protein–ligand interaction diagram using RDKit and Matplotlib.
+        :param mol: Union[int, str]
+            0-based index or molecule name specifying which loaded ligand to draw. Defaults to ``0``.
         :param show_chain: Union[bool, str]
             Whether to append the PDB chain ID to residue labels (e.g., 'Phe97A'). Can be True (default), False,
             or 'auto' (shows chain IDs only when multiple chains contact the ligand).
@@ -1317,6 +1402,7 @@ class PLI:
         :return: Optional[matplotlib.figure.Figure]
             Returns the Matplotlib Figure when show=False, otherwise None.
         """
+        self._select_ligand(mol)
         draw_include_ionic = bool(detect_kwargs.get("include_ionic", False))
         if detect_kwargs:
             self._detect(**{"include_ionic": False, **detect_kwargs})
@@ -2835,11 +2921,15 @@ def _prepare_view_payload(
     split_hbonds: bool,
     include_pharmacophore: bool,
     color: Optional[dict],
+    pdb_data: Optional[str] = None,
+    include_pdb: bool = True,
+    name: Optional[str] = None,
 ) -> dict:
     """Build backend-neutral 3D receptor/ligand/interaction geometry specs for PLI.view()."""
     palette = _resolve_color_palette(PLI_COLORS, color)
-    with open(pli.protein_pdb, "r") as f:
-        pdb_data = f.read()
+    if include_pdb and pdb_data is None:
+        with open(pli.protein_pdb, "r") as f:
+            pdb_data = f.read()
     lig_molblock = Chem.MolToMolBlock(pli.ligand_no_h)
 
     prot_conf = pli.protein.GetConformer()
@@ -2937,8 +3027,7 @@ def _prepare_view_payload(
         feats = pli._to_pharmacophore()
         pharm_feats = _build_view_feature_specs(feats, INTERACTIVE_COLORS)
 
-    return {
-        "pdb_data": pdb_data,
+    payload = {
         "lig_molblock": lig_molblock,
         "protein_repr": protein_repr,
         "pocket_repr": pocket_repr,
@@ -2949,6 +3038,11 @@ def _prepare_view_payload(
         "distance_labels": distance_labels,
         "pharm_feats": pharm_feats,
     }
+    if include_pdb:
+        payload["pdb_data"] = pdb_data
+    if name is not None:
+        payload["name"] = name
+    return payload
 
 
 def _render_pli_jupyter(payload: dict, window: tuple[int, int]):
@@ -3026,17 +3120,26 @@ def _render_pli_jupyter(payload: dict, window: tuple[int, int]):
     return viewer.show()
 
 
-def _render_pli_marimo(payload: dict, window: tuple[int, int], prefix: str):
-    """Render a self-contained 3Dmol.js Marimo iframe for a PLI complex."""
+def _render_pli_marimo(
+    pdb_data: str,
+    lig_payloads: list[dict],
+    protein_repr: Optional[str],
+    pocket_repr: str,
+    window: tuple[int, int],
+    prefix: str,
+):
+    """Render a self-contained 3Dmol.js Marimo iframe for one or more PLI complexes."""
     try:
         import marimo as mo
     except Exception as exc:
         return exc
 
     width, height = window
+    sel_style = ' style="display:none"' if len(lig_payloads) <= 1 else ""
     html = f"""
     <script src="https://3Dmol.org/build/3Dmol-min.js"></script>
     <div style="font:13px sans-serif;display:flex;gap:8px;align-items:center;margin-bottom:8px">
+      <select id="sel"{sel_style}></select>
       <select id="scale" title="Export resolution">
         <option value="1">1x</option><option value="2" selected>2x</option><option value="4">4x</option>
       </select>
@@ -3057,8 +3160,13 @@ def _render_pli_marimo(payload: dict, window: tuple[int, int], prefix: str):
     </div>
     <div id="viewer" style="width:{width}px;height:{height}px;position:relative"></div>
     <script>
-    const PAYLOAD = {json.dumps(payload)};
+    const PDB_DATA = {json.dumps(pdb_data)};
+    const LIGANDS = {json.dumps(lig_payloads)};
+    const PROTEIN_REPR = {json.dumps(protein_repr)};
+    const POCKET_REPR = {json.dumps(pocket_repr)};
     const box = document.getElementById("viewer");
+    const sel = document.getElementById("sel");
+    LIGANDS.forEach((d, i) => sel.add(new Option(d.name || ("Molecule " + (i + 1)), i)));
     const viewer = $3Dmol.createViewer(box, {{backgroundColor: "white"}});
 
     function addWedge(viewer, f) {{
@@ -3084,48 +3192,58 @@ def _render_pli_marimo(payload: dict, window: tuple[int, int], prefix: str):
       viewer.addCustom({{vertexArr: verts, normalArr: norms, faceArr: faces, color: f.color, opacity: 0.35}});
     }}
 
-    viewer.addModel(PAYLOAD.pdb_data, "pdb");
-    if (PAYLOAD.protein_repr === "cartoon") {{
-      viewer.setStyle({{model: 0}}, {{cartoon: {{color: "#CBD5E1", opacity: 0.65}}}});
-    }} else if (PAYLOAD.protein_repr === "line") {{
-      viewer.setStyle({{model: 0}}, {{line: {{color: "#CBD5E1", opacity: 0.45}}}});
-    }} else {{
-      viewer.setStyle({{model: 0}}, {{}});
+    function render(i) {{
+      const d = LIGANDS[i];
+      viewer.removeAllModels();
+      viewer.removeAllShapes();
+      viewer.removeAllLabels();
+
+      viewer.addModel(PDB_DATA, "pdb");
+      if (PROTEIN_REPR === "cartoon") {{
+        viewer.setStyle({{model: 0}}, {{cartoon: {{color: "#CBD5E1", opacity: 0.65}}}});
+      }} else if (PROTEIN_REPR === "line") {{
+        viewer.setStyle({{model: 0}}, {{line: {{color: "#CBD5E1", opacity: 0.45}}}});
+      }} else {{
+        viewer.setStyle({{model: 0}}, {{}});
+      }}
+
+      const pocketStyle = POCKET_REPR === "stick"
+        ? {{stick: {{colorscheme: "grayCarbon", radius: 0.16}}}}
+        : {{line: {{colorscheme: "grayCarbon", linewidth: 2.0}}}};
+      d.pocket_sels.forEach(s => viewer.addStyle(s, pocketStyle));
+
+      viewer.addModel(d.lig_molblock, "mol");
+      viewer.setStyle({{model: 1}}, {{stick: {{colorscheme: "cyanCarbon", radius: 0.20}}}});
+
+      d.cylinders.forEach(c => viewer.addCylinder(c));
+      d.ring_spheres.forEach(sp => {{
+        viewer.addSphere({{center: {{x: sp.x, y: sp.y, z: sp.z}}, radius: sp.radius, color: sp.color, opacity: 0.9}});
+      }});
+      d.residue_labels.forEach(lbl => {{
+        viewer.addLabel(lbl.text, {{
+          position: {{x: lbl.x, y: lbl.y, z: lbl.z}},
+          fontSize: 11, fontColor: "#1E293B", showBackground: true,
+          backgroundColor: "#F8FAFC", backgroundOpacity: 0.85
+        }});
+      }});
+      d.distance_labels.forEach(dl => {{
+        viewer.addLabel(dl.text, {{
+          position: {{x: dl.x, y: dl.y, z: dl.z}},
+          fontSize: 10, fontColor: "white", showBackground: true,
+          backgroundColor: dl.color, backgroundOpacity: 0.9
+        }});
+      }});
+      d.pharm_feats.forEach(f => {{
+        if (f.phi0 !== null) addWedge(viewer, f);
+        else viewer.addSphere({{center: {{x: f.x, y: f.y, z: f.z}}, radius: f.radius, color: f.color, opacity: 0.35}});
+      }});
+
+      viewer.zoomTo({{model: 1}});
+      viewer.render();
     }}
 
-    const pocketStyle = PAYLOAD.pocket_repr === "stick"
-      ? {{stick: {{colorscheme: "grayCarbon", radius: 0.16}}}}
-      : {{line: {{colorscheme: "grayCarbon", linewidth: 2.0}}}};
-    PAYLOAD.pocket_sels.forEach(sel => viewer.addStyle(sel, pocketStyle));
-
-    viewer.addModel(PAYLOAD.lig_molblock, "mol");
-    viewer.setStyle({{model: 1}}, {{stick: {{colorscheme: "cyanCarbon", radius: 0.20}}}});
-
-    PAYLOAD.cylinders.forEach(c => viewer.addCylinder(c));
-    PAYLOAD.ring_spheres.forEach(sp => {{
-      viewer.addSphere({{center: {{x: sp.x, y: sp.y, z: sp.z}}, radius: sp.radius, color: sp.color, opacity: 0.9}});
-    }});
-    PAYLOAD.residue_labels.forEach(lbl => {{
-      viewer.addLabel(lbl.text, {{
-        position: {{x: lbl.x, y: lbl.y, z: lbl.z}},
-        fontSize: 11, fontColor: "#1E293B", showBackground: true,
-        backgroundColor: "#F8FAFC", backgroundOpacity: 0.85
-      }});
-    }});
-    PAYLOAD.distance_labels.forEach(dl => {{
-      viewer.addLabel(dl.text, {{
-        position: {{x: dl.x, y: dl.y, z: dl.z}},
-        fontSize: 10, fontColor: "white", showBackground: true,
-        backgroundColor: dl.color, backgroundOpacity: 0.9
-      }});
-    }});
-    PAYLOAD.pharm_feats.forEach(f => {{
-      if (f.phi0 !== null) addWedge(viewer, f);
-      else viewer.addSphere({{center: {{x: f.x, y: f.y, z: f.z}}, radius: f.radius, color: f.color, opacity: 0.35}});
-    }});
-
-    viewer.zoomTo({{model: 1}});
-    viewer.render();
+    sel.onchange = () => render(+sel.value);
+    render(0);
 
     document.querySelectorAll("[data-pan]").forEach(b => b.onclick = () => {{
       const [dx, dy] = b.dataset.pan.split(",").map(Number);
@@ -3149,7 +3267,9 @@ def _render_pli_marimo(payload: dict, window: tuple[int, int], prefix: str):
       viewer.render();
       const a = document.createElement("a");
       a.href = uri;
-      a.download = "{prefix}_interactions.png";
+      a.download = LIGANDS.length > 1
+        ? `{prefix}_mol_${{+sel.value + 1}}_interactions.png`
+        : `{prefix}_interactions.png`;
       document.body.appendChild(a); a.click(); a.remove();
     }};
     </script>"""
@@ -3358,12 +3478,8 @@ def _prepare_ligand_mol(
     return mol
 
 
-def _read_sdf_records(
-    sdf_path: str,
-    indices: Optional[list[int]] = None,
-    add_hs: bool = False,
-) -> list[Chem.Mol]:
-    """Read and prepare one or all SDF records, falling back to sanitize=False repair when needed."""
+def _read_sdf_records(sdf_path: str, add_hs: bool = False) -> list[Chem.Mol]:
+    """Read and prepare all SDF records, falling back to sanitize=False repair when needed."""
     with rdBase.BlockLogs():
         supplier = Chem.SDMolSupplier(sdf_path, removeHs=False)
         num_records = len(supplier)
@@ -3371,14 +3487,9 @@ def _read_sdf_records(
     if num_records == 0:
         raise ValueError(f"No molecule records found in SDF file: {sdf_path}")
 
-    target_indices = list(range(num_records)) if indices is None else indices
     raw_supplier = None
     mols: list[Chem.Mol] = []
-    for idx in target_indices:
-        if idx < 0 or idx >= num_records:
-            raise IndexError(
-                f"pose_idx={idx} out of range for {sdf_path} ({num_records} record(s))."
-            )
+    for idx in range(num_records):
         needs_sanitize = False
         with rdBase.BlockLogs():
             mol = supplier[idx]
@@ -3388,7 +3499,7 @@ def _read_sdf_records(
             mol = raw_supplier[idx]
             needs_sanitize = True
         if mol is None:
-            raise ValueError(f"RDKit failed to parse ligand at pose_idx={idx} in {sdf_path}.")
+            raise ValueError(f"RDKit failed to parse ligand at index {idx} in {sdf_path}.")
         mols.append(
             _prepare_ligand_mol(
                 mol,
@@ -3399,69 +3510,42 @@ def _read_sdf_records(
     return mols
 
 
-def _load_ligand(
-    ligand: Union[str, os.PathLike, Chem.Mol],
-    pose_idx: int = 0,
+def _load_ligands(
+    ligand: Union[str, os.PathLike, Chem.Mol, list[Chem.Mol], tuple[Chem.Mol, ...]],
     add_hs: bool = False,
-) -> Chem.Mol:
-    """
-    Load a 3D ligand from an .sdf file (at pose_idx) or copy an in-memory RDKit Chem.Mol.
-    """
+) -> list[Chem.Mol]:
+    """Load one or more 3D ligands from an .sdf file, an RDKit Chem.Mol, or a sequence of Chem.Mol."""
     if isinstance(ligand, Chem.Mol):
-        return _prepare_ligand_mol(Chem.Mol(ligand), add_hs=add_hs)
+        return [_prepare_ligand_mol(Chem.Mol(ligand), add_hs=add_hs)]
     if isinstance(ligand, (str, os.PathLike)):
         sdf_path = str(ligand)
         if not os.path.isfile(sdf_path):
             raise FileNotFoundError(f"Ligand SDF file not found: {sdf_path}")
-        return _read_sdf_records(
-            sdf_path,
-            indices=[pose_idx],
-            add_hs=add_hs,
-        )[0]
-    raise TypeError("ligand must be a path to an .sdf file or an RDKit Chem.Mol.")
-
-
-def _load_ligand_batch(
-    ligands: Union[str, os.PathLike, Chem.Mol, list[Chem.Mol], tuple[Chem.Mol, ...]],
-    fallback_source: Union[str, os.PathLike, Chem.Mol],
-    default_mol: Chem.Mol,
-    add_hs: bool = False,
-) -> list[Chem.Mol]:
-    """Load one or more 3D ligands from 'all', an .sdf file, a Chem.Mol, or a sequence of Chem.Mol."""
-    if isinstance(ligands, Chem.Mol):
-        return [_prepare_ligand_mol(Chem.Mol(ligands), add_hs=add_hs)]
-
-    if isinstance(ligands, (str, os.PathLike)):
-        spec = str(ligands)
-        if spec == "all":
-            if isinstance(fallback_source, Chem.Mol):
-                return [Chem.Mol(default_mol)]
-            sdf_path = str(fallback_source)
-        else:
-            sdf_path = spec
-        if not os.path.isfile(sdf_path):
-            raise FileNotFoundError(f"Ligand SDF file not found: {sdf_path}")
-        return _read_sdf_records(
-            sdf_path,
-            indices=None,
-            add_hs=add_hs,
-        )
+        return _read_sdf_records(sdf_path, add_hs=add_hs)
 
     try:
-        items = list(ligands)
+        items = list(ligand)
     except TypeError as exc:
         raise TypeError(
-            "ligands must be None, 'all', a path to an .sdf file, a Chem.Mol, or a list of Chem.Mol."
+            "ligand must be a path to an .sdf file, an RDKit Chem.Mol, or a sequence of Chem.Mol."
         ) from exc
 
     if not items:
-        raise ValueError("ligands sequence cannot be empty.")
+        raise ValueError("ligand sequence cannot be empty.")
     out: list[Chem.Mol] = []
     for idx, item in enumerate(items):
         if not isinstance(item, Chem.Mol):
-            raise TypeError(f"Expected RDKit Chem.Mol at ligands[{idx}], got {type(item).__name__}.")
+            raise TypeError(f"Expected RDKit Chem.Mol at ligand[{idx}], got {type(item).__name__}.")
         out.append(_prepare_ligand_mol(Chem.Mol(item), add_hs=add_hs))
     return out
+
+
+def _dropdown_labels(names: list[str]) -> list[str]:
+    """Build dropdown option labels, prefixing duplicate molecule names with 0-based indices."""
+    counts: dict[str, int] = {}
+    for name in names:
+        counts[name] = counts.get(name, 0) + 1
+    return [name if counts[name] == 1 else f"{i}: {name}" for i, name in enumerate(names)]
 
 
 def _build_heavy_atom_map(mol: Chem.Mol) -> tuple[Chem.Mol, dict[int, int], dict[int, int]]:
