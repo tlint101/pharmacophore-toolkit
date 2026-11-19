@@ -4,6 +4,7 @@ Script to draw pharmacophore
 
 import os
 import io
+import math
 import py3Dmol
 import json
 import warnings
@@ -372,28 +373,36 @@ class View:
             pharma_index = self.pharmacophore  # if multiple pharmacophore is given
         else:
             pharma_index = self.pharmacophore[index]  # single pharmacophore
-        for pharma in pharma_index:
-            label = pharma[0]
-            x = pharma[2]
-            y = pharma[3]
-            z = pharma[4]
-            color = self.colors.get(label, )
-
-            viewer.addSphere({
-                "center": {"x": x, "y": y, "z": z},
-                "radius": 0.5,
-                "color": color,
-                "opacity": 0.9,
-            })
+        # build sphere feature labels
+        for feat in _build_view_feature_specs(pharma_index, self.colors):
+            if feat["phi0"] is None:
+                viewer.addSphere({
+                    "center": {"x": feat["x"], "y": feat["y"], "z": feat["z"]},
+                    "radius": feat["radius"],
+                    "color": feat["color"],
+                    "opacity": feat["opacity"],
+                })
+            else:
+                mesh = _build_sphere_wedge_mesh(
+                    feat["x"], feat["y"], feat["z"], feat["radius"], feat["phi0"], feat["phi1"]
+                )
+                viewer.addCustom({
+                    **mesh,
+                    "color": feat["color"],
+                    "opacity": feat["opacity"],
+                })
 
             if self.labels:
-                viewer.addLabel(label, {
-                    "position": {"x": x, "y": y, "z": z},
+                label_spec = {
+                    "position": {"x": feat["x"], "y": feat["y"], "z": feat["z"]},
                     "fontSize": 12,
                     "showBackground": True,
-                    "backgroundColor": color,
-                    "fontColor": "white"
-                })
+                    "backgroundColor": feat["color"],
+                    "fontColor": "white",
+                }
+                if feat["screenOffsetY"] != 0:
+                    label_spec["screenOffset"] = {"x": 0, "y": feat["screenOffsetY"]}
+                viewer.addLabel(feat["label"], label_spec)
 
         viewer.show()
 
@@ -438,10 +447,7 @@ class View:
             data.append({
                 "name": f"Molecule {i + 1}",
                 "mol": Chem.MolToMolBlock(m),
-                "feats": [{"label": f[0],
-                           "x": float(f[2]), "y": float(f[3]), "z": float(f[4]),
-                           "color": _css_color(color.get(f[0]))}
-                          for f in feats],
+                "feats": _build_view_feature_specs(feats, color),
             })
 
         width, height = window
@@ -477,6 +483,29 @@ class View:
         DATA.forEach((d, i) => sel.add(new Option(d.name, i)));
         const viewer = $3Dmol.createViewer(box, {{backgroundColor: "white"}});
 
+        function addWedge(viewer, f) {{
+          const nLat = 14, nLon = 12, stride = nLon + 1;
+          const verts = [], norms = [], faces = [];
+          for (let i = 0; i <= nLat; i++) {{
+            const th = Math.PI * i / nLat, st = Math.sin(th), ct = Math.cos(th);
+            for (let j = 0; j <= nLon; j++) {{
+              const ph = f.phi0 + (f.phi1 - f.phi0) * j / nLon;
+              const nx = st * Math.sin(ph), ny = ct, nz = st * Math.cos(ph);
+              verts.push(new $3Dmol.Vector3(f.x + f.radius * nx, f.y + f.radius * ny, f.z + f.radius * nz));
+              norms.push(new $3Dmol.Vector3(nx, ny, nz));
+            }}
+          }}
+          for (let i = 0; i < nLat; i++) {{
+            for (let j = 0; j < nLon; j++) {{
+              const v00 = i * stride + j, v10 = (i + 1) * stride + j;
+              const v11 = (i + 1) * stride + (j + 1), v01 = i * stride + (j + 1);
+              if (i > 0) faces.push(v00, v11, v01);
+              if (i < nLat - 1) faces.push(v00, v10, v11);
+            }}
+          }}
+          viewer.addCustom({{vertexArr: verts, normalArr: norms, faceArr: faces, color: f.color, opacity: f.opacity}});
+        }}
+
         function render(i) {{
           const d = DATA[i];
           viewer.removeAllModels(); viewer.removeAllShapes(); viewer.removeAllLabels();
@@ -484,10 +513,16 @@ class View:
           viewer.setStyle({{}}, {{stick: {{}}}});
           d.feats.forEach(f => {{
             const pos = {{x: f.x, y: f.y, z: f.z}};
-            viewer.addSphere({{center: pos, radius: 0.5, color: f.color, opacity: 0.9}});
+            if (f.phi0 !== null) {{
+              addWedge(viewer, f);
+            }} else {{
+              viewer.addSphere({{center: pos, radius: f.radius, color: f.color, opacity: f.opacity}});
+            }}
             if (LABELS) {{
-              viewer.addLabel(f.label, {{position: pos, fontSize: 12, showBackground: true,
-                                         backgroundColor: f.color, fontColor: "white"}});
+              const lspec = {{position: pos, fontSize: 12, showBackground: true,
+                              backgroundColor: f.color, fontColor: "white"}};
+              if (f.screenOffsetY) lspec.screenOffset = {{x: 0, y: f.screenOffsetY}};
+              viewer.addLabel(f.label, lspec);
             }}
           }});
           viewer.zoomTo(); viewer.render();
@@ -525,6 +560,89 @@ class View:
         </script>"""
 
         return mo.iframe(html, height=f"{height + 110}px")
+
+
+def _build_sphere_wedge_mesh(
+    cx: float,
+    cy: float,
+    cz: float,
+    radius: float,
+    phi0: float,
+    phi1: float,
+    n_lat: int = 14,
+    n_lon: int = 12,
+) -> dict:
+    """Build vertex, normal, and outward triangle face arrays for a spherical wedge."""
+    verts: list[dict[str, float]] = []
+    norms: list[dict[str, float]] = []
+    faces: list[int] = []
+    stride = n_lon + 1
+    for i in range(n_lat + 1):
+        theta = math.pi * i / n_lat
+        st, ct = math.sin(theta), math.cos(theta)
+        for j in range(n_lon + 1):
+            phi = phi0 + (phi1 - phi0) * j / n_lon
+            nx, ny, nz = st * math.sin(phi), ct, st * math.cos(phi)
+            verts.append({
+                "x": round(cx + radius * nx, 5),
+                "y": round(cy + radius * ny, 5),
+                "z": round(cz + radius * nz, 5),
+            })
+            norms.append({"x": round(nx, 5), "y": round(ny, 5), "z": round(nz, 5)})
+
+    for i in range(n_lat):
+        for j in range(n_lon):
+            v00 = i * stride + j
+            v10 = (i + 1) * stride + j
+            v11 = (i + 1) * stride + (j + 1)
+            v01 = i * stride + (j + 1)
+            if i > 0:
+                faces.extend([v00, v11, v01])
+            if i < n_lat - 1:
+                faces.extend([v00, v10, v11])
+
+    return {"vertexArr": verts, "normalArr": norms, "faceArr": faces}
+
+
+def _build_view_feature_specs(feats: list, colors: dict) -> list[dict]:
+    """
+    Build sphere/wedge parameters and screen-space label offsets for View rendering. If atom belongs to multiple types,
+    split sphere into equal wedges with vertically stacked screenOffset labels.
+    """
+    coord_groups: dict[tuple[float, float, float], list[int]] = {}
+    for idx, feat in enumerate(feats):
+        key = (round(float(feat[2]), 3), round(float(feat[3]), 3), round(float(feat[4]), 3))
+        coord_groups.setdefault(key, []).append(idx)
+
+    specs: list[dict] = []
+    for idx, feat in enumerate(feats):
+        label = str(feat[0])
+        x, y, z = float(feat[2]), float(feat[3]), float(feat[4])
+        key = (round(x, 3), round(y, 3), round(z, 3))
+        group = coord_groups[key]
+        k = len(group)
+        if k == 1:
+            phi0, phi1 = None, None
+            offset_y = 0
+        else:
+            rank = group.index(idx)
+            phi0 = 2.0 * math.pi * rank / k
+            phi1 = 2.0 * math.pi * (rank + 1) / k
+            offset_y = int(round((rank - 0.5 * (k - 1)) * 26))
+
+        specs.append({
+            "label": label,
+            "x": x,
+            "y": y,
+            "z": z,
+            "color": _css_color(colors.get(label)),
+            "radius": 0.5,
+            "opacity": 0.9,
+            "phi0": phi0,
+            "phi1": phi1,
+            "screenOffsetY": offset_y,
+        })
+    return specs
 
 
 def _css_color(c):

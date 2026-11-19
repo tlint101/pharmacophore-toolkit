@@ -1,3 +1,4 @@
+import math
 import warnings
 import collections
 import pandas as pd
@@ -7,7 +8,13 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 from typing import Union, Optional
 
-from pharmacophore.constants import feature_factory, FEATURES, FEATURE_COLORS, color_convert
+from pharmacophore.constants import (
+    feature_factory,
+    FEATURES,
+    FEATURE_COLORS,
+    color_convert,
+    format_pymol_split_spheres_block,
+)
 
 
 class Pharmacophore:
@@ -246,14 +253,21 @@ class Pharmacophore:
             # features = feat_factory.GetFeaturesForMol(mol)
             print(f"Number of features: {len(feature_list)}")
 
-            # set feature colors
+            # Resolve feature RGB colors for pseudoatom set_color and CGO wedges
+            resolved_colors = {k: tuple(v) for k, v in FEATURE_COLORS.items()}
             if color is None:
                 for feat in FEATURE_COLORS:
                     f.write(f"set_color {feat}_color, {FEATURE_COLORS[feat]}\n")
             # if custom color, convert to RGB
             elif isinstance(color, dict):
                 for shade in color:
-                    rgb = color_convert(color[shade])
+                    val = color[shade]
+                    rgb = (
+                        tuple(float(c) for c in val[:3])
+                        if isinstance(val, (tuple, list)) and len(val) in (3, 4)
+                        else tuple(color_convert(val))
+                    )
+                    resolved_colors[shade] = rgb
                     # print(rgb)  # for troubleshooting
                     f.write(f"set_color {shade}_color, {rgb}\n")
             else:
@@ -264,21 +278,34 @@ class Pharmacophore:
                 "Acceptor": 0, "Donor": 0, "Hydrophobe": 0, "Aromatic": 0,
                 "LumpedHydrophobe": 0, "PosIonizable": 0, "NegIonizable": 0,
             }
+            coord_groups = {}
+            for idx, feat in enumerate(feature_list):
+                coord_key = (round(float(feat[2]), 3), round(float(feat[3]), 3), round(float(feat[4]), 3))
+                coord_groups.setdefault(coord_key, []).append(idx)
 
-            # get features
-            for feat in feature_list:
+            split_specs = []
+            for idx, feat in enumerate(feature_list):
                 feature = feat[0]  # extract feature type
                 feature_counts[feature] += 1  # give feature count
                 count = feature_counts[feature]  # get current count
-                # get feature position
                 pos_x = feat[2]
                 pos_y = feat[3]
                 pos_z = feat[4]
-
-                f.write(
-                    # f"pseudoatom {feature}_{count}, pos=[{pos_x}, {pos_y}, {pos_z}], color={color_type}\n"
-                    f"pseudoatom {feature}_{count}, pos=[{pos_x}, {pos_y}, {pos_z}]\n"
-                )
+                obj_name = f"{feature}_{count}"
+                coord_key = (round(float(pos_x), 3), round(float(pos_y), 3), round(float(pos_z), 3))
+                group = coord_groups[coord_key]
+                if len(group) == 1:
+                    f.write(
+                        # f"pseudoatom {obj_name}, pos=[{pos_x}, {pos_y}, {pos_z}], color={color_type}\n"
+                        f"pseudoatom {obj_name}, pos=[{pos_x}, {pos_y}, {pos_z}]\n"
+                    )
+                else:
+                    rank = group.index(idx)
+                    k = len(group)
+                    phi0 = 2.0 * math.pi * rank / k
+                    phi1 = 2.0 * math.pi * (rank + 1) / k
+                    rgb = resolved_colors.get(feature, (0.5, 0.5, 0.5))
+                    split_specs.append((obj_name, float(pos_x), float(pos_y), float(pos_z), rgb, phi0, phi1))
 
             # todo add mol name in front of pharmacophre
             # set color and sphere size
@@ -338,6 +365,15 @@ class Pharmacophore:
             else:
                 raise ValueError("Issue with type {type}! Only 'sphere' or 'surface' allowed!")
 
+            if split_specs:
+                f.write(
+                    format_pymol_split_spheres_block(
+                        split_specs,
+                        sphere_scale=(sphere_size if type == "sphere" else None),
+                        transparency=(0.0 if type == "sphere" else transparency),
+                    )
+                )
+
         print(f"Feature visualization script written to {savepath}.")
 
     def _calc_pharmacophore(self, mol: Optional[Chem.Mol] = None, features: Optional[dict] = None):
@@ -383,25 +419,22 @@ class Pharmacophore:
                 p = [key, match[0], match[1][0], match[1][1], match[1][2]]
                 pharmacophore.append(p)
 
-        # remove duplicates for aromatic/hydrophobe set
-        atom_indices = set()
-        final_pharmacophore = []
-
-        # extract aromatic/hydrophobe matches by atom index adn remove hydrophobe
+        # Deduplicate exact (family, atom_indices) matches (preserving dual Donor + Acceptor on the same atom)
+        seen_family_indices = set()
+        deduped = []
         for entry in pharmacophore:
             label, atom_indexes, *rest = entry
-            index = frozenset(atom_indexes)  # Convert atom indexes to a frozenset so order does not matter
+            key = (label, frozenset(atom_indexes))
+            if key not in seen_family_indices:
+                seen_family_indices.add(key)
+                deduped.append(entry)
 
-            # Check if the atom indexes are already in the set
-            if index not in atom_indices:
-                final_pharmacophore.append(entry)
-                atom_indices.add(index)
-            # keep Aromatic
-            elif label == 'Aromatic':
-                final_pharmacophore = [e for e in final_pharmacophore if
-                                       not (e[0] == 'Hydrophobe' and frozenset(e[1]) == index)]
-                final_pharmacophore.append(entry)
-                atom_indices.add(index)
+        # Prefer Aromatic over Hydrophobe when both match the exact same ring
+        aromatic_rings = {frozenset(e[1]) for e in deduped if e[0] == "Aromatic"}
+        final_pharmacophore = [
+            e for e in deduped
+            if not (e[0] == "Hydrophobe" and frozenset(e[1]) in aromatic_rings)
+        ]
 
         return final_pharmacophore
 
