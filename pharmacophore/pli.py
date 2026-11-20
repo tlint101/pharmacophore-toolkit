@@ -67,6 +67,7 @@ from pharmacophore.constants import (
     color_convert,
     format_pymol_split_spheres_block,
     is_hbond_acceptor_nitrogen,
+    resolve_pml_output_paths,
 )
 
 _POS_CHARGED_N_QUERY = Chem.MolFromSmarts("[#7;+;!$([N+]([O-]))]")
@@ -372,6 +373,9 @@ class PLI:
         hydrophobic_dist: float = DEFAULT_HYDROPHOBIC_DIST,
         ionic_dist: float = DEFAULT_IONIC_DIST,
         pi_stacking_dist: float = DEFAULT_PI_STACKING_DIST,
+        pi_face_dist: float = DEFAULT_PI_FACE_DIST,
+        pi_face_angle: float = DEFAULT_PI_FACE_ANGLE,
+        pi_edge_angle: float = DEFAULT_PI_EDGE_ANGLE,
         cation_pi_dist: float = DEFAULT_CATION_PI_DIST,
         clash_dist: float = DEFAULT_CLASH_DIST,
     ) -> pd.DataFrame:
@@ -399,7 +403,13 @@ class PLI:
         :param ionic_dist: float
             Maximum heavy-atom distance (Å) for salt bridges / ionic interactions.
         :param pi_stacking_dist: float
-            Maximum ring-centroid distance (Å) for aromatic pi-pi stacking.
+            Maximum ring-centroid distance (Å) for aromatic pi-pi stacking (edge-to-face).
+        :param pi_face_dist: float
+            Maximum ring-centroid distance (Å) for face-to-face pi-pi stacking. Defaults to 4.4.
+        :param pi_face_angle: float
+            Maximum inter-plane angle (degrees) for face-to-face pi-pi stacking. Defaults to 30.0.
+        :param pi_edge_angle: float
+            Minimum inter-plane angle (degrees) for edge-to-face pi-pi stacking. Defaults to 60.0.
         :param cation_pi_dist: float
             Maximum distance (Å) between a cation and an aromatic ring centroid for cation-pi contacts.
         :param clash_dist: float
@@ -423,7 +433,14 @@ class PLI:
             specific_contact_residues.update(r["_res_key"] for r in ionic_rows)
 
         if include_aromatic:
-            arom_rows = self._detect_aromatic(lig_feats, pi_stacking_dist, cation_pi_dist)
+            arom_rows = self._detect_aromatic(
+                lig_feats,
+                pi_stacking_dist,
+                cation_pi_dist,
+                pi_face_dist=pi_face_dist,
+                pi_face_angle=pi_face_angle,
+                pi_edge_angle=pi_edge_angle,
+            )
             rows.extend(arom_rows)
             specific_contact_residues.update(r["_res_key"] for r in arom_rows)
 
@@ -478,8 +495,8 @@ class PLI:
         :param cutoffs: dict
             Optional geometric cutoff overrides: hbond_dist (3.5), hbond_angle (120.0), xbond_dist (3.5),
             xbond_donor_angle (120.0), xbond_acceptor_angle (90.0), hydrophobic_dist (4.0), ionic_dist (5.0),
-            pi_stacking_dist (5.5), pi_face_dist (5.0), cation_pi_dist (6.0), cation_pi_angle (30.0),
-            metal_dist (2.8), vdw_tolerance (0.0).
+            pi_stacking_dist (5.5), pi_face_dist (4.4), pi_face_angle (30.0), pi_edge_angle (60.0),
+            cation_pi_dist (6.0), cation_pi_angle (30.0), metal_dist (2.8), vdw_tolerance (0.0).
         :return: pd.DataFrame
             DataFrame with 'mol_name', 'smiles', and grouped <Interaction>_<RES><NUM> integer count columns.
         """
@@ -532,6 +549,8 @@ class PLI:
             "ionic_dist": float(DEFAULT_IONIC_DIST),
             "pi_stacking_dist": float(DEFAULT_PI_STACKING_DIST),
             "pi_face_dist": float(DEFAULT_PI_FACE_DIST),
+            "pi_face_angle": float(DEFAULT_PI_FACE_ANGLE),
+            "pi_edge_angle": float(DEFAULT_PI_EDGE_ANGLE),
             "cation_pi_dist": float(DEFAULT_CATION_PI_DIST),
             "cation_pi_angle": float(DEFAULT_CATION_PI_ANGLE),
             "metal_dist": float(DEFAULT_METAL_DIST),
@@ -649,7 +668,7 @@ class PLI:
         xlabel: Optional[str] = None,
         dpi: int = 300,
         show: bool = True,
-        savepath: Optional[str] = None,
+        savefig: Optional[str] = None,
         figsize: Optional[tuple[float, float]] = None,
         **to_df_kwargs,
     ):
@@ -676,7 +695,7 @@ class PLI:
         :param show: bool
             If True (default), calls plt.show() for inline display and returns None. If False, returns the
             Matplotlib Figure object.
-        :param savepath: Optional[str]
+        :param savefig: Optional[str]
             Optional output file path (.png, .svg, or any Matplotlib-supported vector/raster format).
         :param figsize: Optional[tuple[float, float]]
             Optional Matplotlib figure size (width, height) in inches. Auto-scaled from table dimensions when None.
@@ -727,7 +746,7 @@ class PLI:
             ax.set_facecolor("white")
             ax.text(0.5, 0.5, "No interactions detected", ha="center", va="center", fontsize=11, color="#475569")
             ax.axis("off")
-            return _finalize_matplotlib_figure(fig, savepath=savepath, dpi=dpi, show=show)
+            return _finalize_matplotlib_figure(fig, savefig=savefig, dpi=dpi, show=show)
 
         present_set = {parsed[r][1] for r in range(n_rows) if np.any(counts[r] > 0)}
         present_interactions = [it for it in PROLIG_INTERACTION_ORDER if it in present_set]
@@ -844,7 +863,7 @@ class PLI:
             )
 
         fig.tight_layout()
-        return _finalize_matplotlib_figure(fig, savepath=savepath, dpi=dpi, show=show)
+        return _finalize_matplotlib_figure(fig, savefig=savefig, dpi=dpi, show=show)
 
     def _to_pharmacophore(self, **detect_kwargs) -> list:
         """
@@ -920,8 +939,8 @@ class PLI:
 
     def output_pli(
         self,
-        savepath: str,
-        mol: Union[int, str] = 0,
+        savepath: Union[str, os.PathLike],
+        mol: Optional[Union[int, str, list[Union[int, str]], tuple[Union[int, str], ...]]] = None,
         pocket_repr: Optional[str] = "lines",
         show_labels: bool = False,
         split_hbonds: bool = False,
@@ -933,13 +952,19 @@ class PLI:
         dash_radius: Optional[float] = 0.12,
         color: Optional[dict] = None,
         **detect_kwargs,
-    ) -> str:
+    ) -> Union[str, list[str]]:
         """
-        Write a drag-and-drop PyMOL (.pml) visualization script for the detected protein–ligand interactions.
-        :param savepath: str
-            Output file path ending in .pml.
-        :param mol: Union[int, str]
-            0-based index or molecule name specifying which loaded ligand to export. Defaults to ``0``.
+        Write drag-and-drop PyMOL (``.pml``) visualization script(s) for detected protein–ligand interactions.
+
+        When exporting a single ligand, ``savepath`` may be either an explicit ``.pml`` file path or an output
+        directory (writing ``<dir>/<mol_name>_pli.pml``). When exporting multiple ligands (including the
+        default ``mol=None`` on multi-ligand ``PLI`` objects), ``savepath`` must be an output directory and
+        writes ``<mol_name>_pli.pml`` per ligand with molecule-prefixed PyMOL object and group names.
+        :param savepath: Union[str, os.PathLike]
+            Required ``.pml`` file path (single ligand) or output directory path (single or multiple ligands).
+        :param mol: Optional[Union[int, str, list[Union[int, str]], tuple[Union[int, str], ...]]]
+            0-based index, molecule name string, sequence of indices/names, or ``None`` (default: export all
+            loaded ligands).
         :param pocket_repr: Optional[str]
             PyMOL representation for interacting pocket residues ('lines' default, 'sticks', or None to omit).
         :param show_labels: bool
@@ -964,163 +989,68 @@ class PLI:
             hex strings, or RGB tuples.
         :param detect_kwargs: dict
             Optional keyword arguments forwarded to PLI._detect() (forces recomputation when supplied).
-        :return: str
-            Path to the written .pml file.
+        :return: Union[str, list[str]]
+            Written ``.pml`` file path when exporting one ligand, or list of written paths when exporting multiple.
         """
-        if not savepath or not isinstance(savepath, (str, os.PathLike)):
-            raise ValueError("savepath must be a non-empty file path.")
-        savepath_str = str(savepath).strip()
-        if not savepath_str:
-            raise ValueError("savepath must be a non-empty file path.")
         if pocket_repr not in ("lines", "sticks", None):
             raise ValueError(
                 f"Invalid pocket_repr={pocket_repr!r}. Only 'lines', 'sticks', or None are supported."
             )
-
-        self._select_ligand(mol)
-        if detect_kwargs or self.interactions_df is None:
-            self._detect(**detect_kwargs)
 
         palette = {k: list(v) for k, v in PML_COLORS.items()}
         if color is not None:
             if not isinstance(color, dict):
                 raise ValueError("color must be a dictionary mapping interaction types to colors.")
             for key, val in color.items():
-                if isinstance(val, (tuple, list)) and len(val) == 3:
+                if isinstance(val, (tuple, list)) and len(val) in (3, 4):
                     palette[key] = [float(val[0]), float(val[1]), float(val[2])]
                 else:
                     palette[key] = list(color_convert(val))
 
-        parent_dir = os.path.dirname(savepath_str)
-        if parent_dir:
-            os.makedirs(parent_dir, exist_ok=True)
+        if mol is None:
+            indices = list(range(len(self._ligand_entries)))
+        elif isinstance(mol, (list, tuple)):
+            if not mol:
+                raise ValueError("mol sequence cannot be empty.")
+            indices = [self._resolve_ligand_index(m) for m in mol]
+        else:
+            indices = [self._resolve_ligand_index(mol)]
 
-        dash_prefixes = {
-            "HBond_Donor": "hbond",
-            "HBond_Acceptor": "hbond",
-            "Pi_Stacking": "pistack",
-            "Cation_Pi": "catpi",
-            "Ionic": "ionic",
-            "Clash": "clash",
-        }
+        selected_names = [self.mol_names[i] for i in indices]
+        out_paths, safe_names = resolve_pml_output_paths(savepath, selected_names, suffix="pli")
 
-        group_members: list[str] = []
-        has_pocket = False
-
-        with open(savepath_str, "w") as f:
-            f.write("# Drag-and-drop PyMOL script generated by pharmacophore-toolkit (PLI)\n")
-            f.write("set auto_zoom, off\n\n")
-
-            for key, rgb in palette.items():
-                f.write(f"set_color pli_{key.lower()}_color, [{rgb[0]:.4f}, {rgb[1]:.4f}, {rgb[2]:.4f}]\n")
-
-            if include_pharmacophore:
-                for fam, rgb in FEATURE_COLORS.items():
-                    f.write(
-                        f"set_color pli_pharm_{fam.lower()}_color, "
-                        f"[{rgb[0]:.4f}, {rgb[1]:.4f}, {rgb[2]:.4f}]\n"
-                    )
-            f.write("recolor\n\n")
-
-            unique_residues = sorted(
-                {(rec["chain"], rec["residue_number"]) for rec in self._interaction_records}
-            )
-            if unique_residues:
-                has_pocket = True
-                clauses = [
-                    f"(chain {ch} and resi {rnum})" if ch else f"(resi {rnum})"
-                    for ch, rnum in unique_residues
-                ]
-                f.write(f"select pli_pocket_residues, polymer.protein and ({' or '.join(clauses)})\n")
-                f.write("deselect\n")
-                if pocket_repr is not None:
-                    f.write(f"show {pocket_repr}, pli_pocket_residues\n")
-                    if pocket_repr == "lines":
-                        f.write(f"set line_width, {line_width}, pli_pocket_residues\n")
-                    f.write("util.cnc pli_pocket_residues\n")
-                f.write("\n")
-                group_members.append("pli_pocket_residues")
-
-            dash_idx = 0
-            for rec in self._interaction_records:
-                itype = rec["interaction_type"]
-                if itype not in dash_prefixes:
-                    continue
-                dash_idx += 1
-                prefix = dash_prefixes[itype]
-                obj_name = f"{prefix}_{rec['residue_name']}{rec['residue_number']}_{dash_idx}"
-                color_key = (
-                    (itype if split_hbonds else "HBond")
-                    if itype in ("HBond_Donor", "HBond_Acceptor")
-                    else itype
+        is_multi = len(out_paths) > 1
+        prev_idx = self._active_idx
+        try:
+            for lig_idx, out_path, mol_prefix in zip(indices, out_paths, safe_names):
+                self._select_ligand(lig_idx)
+                if detect_kwargs or self.interactions_df is None:
+                    self._detect(**detect_kwargs)
+                _write_single_pli_pml(
+                    pli=self,
+                    savepath_str=out_path,
+                    mol_prefix=mol_prefix,
+                    pocket_repr=pocket_repr,
+                    show_labels=show_labels,
+                    split_hbonds=split_hbonds,
+                    include_pharmacophore=include_pharmacophore,
+                    sphere_size=sphere_size,
+                    line_width=line_width,
+                    dash_gap=dash_gap,
+                    dash_width=dash_width,
+                    dash_radius=dash_radius,
+                    palette=palette,
+                    verbose=not is_multi,
                 )
-                lx, ly, lz = rec["ligand_coords"]
-                px, py, pz = rec["protein_coords"]
+        finally:
+            if len(indices) > 1 and prev_idx >= 0:
+                self._select_ligand(prev_idx)
 
-                f.write(f"pseudoatom _pli_tmp_a, pos=[{lx}, {ly}, {lz}]\n")
-                f.write(f"pseudoatom _pli_tmp_b, pos=[{px}, {py}, {pz}]\n")
-                f.write(f"distance {obj_name}, _pli_tmp_a, _pli_tmp_b\n")
-                f.write("delete _pli_tmp_a\n")
-                f.write("delete _pli_tmp_b\n")
-                f.write(f"set dash_color, pli_{color_key.lower()}_color, {obj_name}\n")
-                if dash_gap is not None:
-                    f.write(f"set dash_gap, {dash_gap}, {obj_name}\n")
-                if dash_width is not None:
-                    f.write(f"set dash_width, {dash_width}, {obj_name}\n")
-                if dash_radius is not None:
-                    f.write(f"set dash_radius, {dash_radius}, {obj_name}\n")
-                if not show_labels:
-                    f.write(f"hide labels, {obj_name}\n")
-                f.write("\n")
-                group_members.append(obj_name)
+        if is_multi:
+            print(f"Number of molecules: {len(out_paths)}")
+            print(f"Protein–ligand interaction scripts written to {str(savepath).strip()}.")
 
-            if include_pharmacophore:
-                feats = self._to_pharmacophore()
-                coord_groups: dict[tuple[float, float, float], list[int]] = {}
-                for idx, (_, _, x, y, z) in enumerate(feats):
-                    key = (round(float(x), 3), round(float(y), 3), round(float(z), 3))
-                    coord_groups.setdefault(key, []).append(idx)
-
-                pharm_counts: dict[str, int] = {}
-                split_specs = []
-                for idx, (fam, _, x, y, z) in enumerate(feats):
-                    pharm_counts[fam] = pharm_counts.get(fam, 0) + 1
-                    obj_name = f"pli_pharm_{fam}_{pharm_counts[fam]}"
-                    key = (round(float(x), 3), round(float(y), 3), round(float(z), 3))
-                    group = coord_groups[key]
-                    if len(group) == 1:
-                        f.write(f"pseudoatom {obj_name}, pos=[{x}, {y}, {z}]\n")
-                        f.write(f"show spheres, {obj_name}\n")
-                        f.write(f"hide nonbonded, {obj_name}\n")
-                        f.write(f"color pli_pharm_{fam.lower()}_color, {obj_name}\n")
-                        f.write(f"set sphere_scale, {sphere_size}, {obj_name}\n")
-                        f.write(f"set sphere_transparency, 0.25, {obj_name}\n\n")
-                    else:
-                        rank = group.index(idx)
-                        k = len(group)
-                        phi0 = 2.0 * math.pi * rank / k
-                        phi1 = 2.0 * math.pi * (rank + 1) / k
-                        rgb = tuple(FEATURE_COLORS.get(fam, (0.5, 0.5, 0.5)))
-                        split_specs.append((obj_name, float(x), float(y), float(z), rgb, phi0, phi1))
-                    group_members.append(obj_name)
-
-                if split_specs:
-                    f.write(
-                        format_pymol_split_spheres_block(
-                            split_specs,
-                            sphere_scale=sphere_size,
-                            transparency=0.25,
-                        )
-                    )
-
-            if group_members:
-                f.write(f"group pli_interactions, {' '.join(group_members)}\n")
-            f.write("set auto_zoom, on\n")
-            if has_pocket:
-                f.write("zoom pli_pocket_residues, 6\n")
-
-        print(f"Protein–ligand interaction script written to {savepath_str}.")
-        return savepath_str
+        return out_paths if is_multi else out_paths[0]
 
     def view(
         self,
@@ -1559,7 +1489,7 @@ class PLI:
         if legend and present_types:
             _draw_pli_legend(ax, present_types, palette)
 
-        return _finalize_matplotlib_figure(fig, savepath=savefig, dpi=dpi, show=show)
+        return _finalize_matplotlib_figure(fig, savefig=savefig, dpi=dpi, show=show)
 
     def _layout_poseview_scene(
         self,
@@ -2517,8 +2447,8 @@ class PLI:
                             theta = float(
                                 np.degrees(np.arccos(np.clip(abs(float(np.dot(p_norm, l_norm))), 0.0, 1.0)))
                             )
-                            is_f2f = dist <= cutoffs["pi_face_dist"] and theta <= DEFAULT_PI_FACE_ANGLE
-                            is_e2f = DEFAULT_PI_EDGE_ANGLE <= theta <= 90.0
+                            is_f2f = dist <= cutoffs["pi_face_dist"] and theta <= cutoffs["pi_face_angle"]
+                            is_e2f = cutoffs["pi_edge_angle"] <= theta <= 90.0
                             if is_f2f or is_e2f:
                                 if "PiStacking" in active_set:
                                     _record("PiStacking", res_key, l_ring, p_ring)
@@ -2884,24 +2814,172 @@ def _resolve_color_palette(base_palette: dict, color: Optional[dict]) -> dict[st
 
 def _finalize_matplotlib_figure(
     fig,
-    savepath: Optional[str],
+    savefig: Optional[str],
     dpi: int,
     show: bool,
 ):
-    """Save a Matplotlib figure when savepath is set and either display or return it."""
-    if savepath is not None:
-        savepath_str = str(savepath).strip()
-        if not savepath_str:
-            raise ValueError("savepath must be a non-empty file path when provided.")
-        parent_dir = os.path.dirname(savepath_str)
+    """Save a Matplotlib figure when savefig is set and either display or return it."""
+    if savefig is not None:
+        savefig_str = str(savefig).strip()
+        if not savefig_str:
+            raise ValueError("savefig must be a non-empty file path when provided.")
+        parent_dir = os.path.dirname(savefig_str)
         if parent_dir:
             os.makedirs(parent_dir, exist_ok=True)
-        fig.savefig(savepath_str, dpi=dpi, bbox_inches="tight", pad_inches=0.1, facecolor="white")
+        fig.savefig(savefig_str, dpi=dpi, bbox_inches="tight", pad_inches=0.1, facecolor="white")
 
     if show:
         plt.show()
         return None
     return fig
+
+
+def _write_single_pli_pml(
+    pli: "PLI",
+    savepath_str: str,
+    mol_prefix: str,
+    pocket_repr: Optional[str],
+    show_labels: bool,
+    split_hbonds: bool,
+    include_pharmacophore: bool,
+    sphere_size: float,
+    line_width: float,
+    dash_gap: Optional[float],
+    dash_width: Optional[float],
+    dash_radius: Optional[float],
+    palette: dict[str, list[float]],
+    verbose: bool = True,
+) -> None:
+    """Write a PyMOL ``.pml`` script for the currently active ligand in ``pli``."""
+    dash_prefixes = {
+        "HBond_Donor": "hbond",
+        "HBond_Acceptor": "hbond",
+        "Pi_Stacking": "pistack",
+        "Cation_Pi": "catpi",
+        "Ionic": "ionic",
+        "Clash": "clash",
+    }
+
+    pocket_sel = f"{mol_prefix}_pli_pocket_residues"
+    group_members: list[str] = []
+    has_pocket = False
+
+    with open(savepath_str, "w") as f:
+        f.write("# Drag-and-drop PyMOL script generated by pharmacophore-toolkit (PLI)\n")
+        f.write("set auto_zoom, off\n\n")
+
+        for key, rgb in palette.items():
+            f.write(
+                f"set_color {mol_prefix}_pli_{key.lower()}_color, [{rgb[0]:.4f}, {rgb[1]:.4f}, {rgb[2]:.4f}]\n"
+            )
+
+        if include_pharmacophore:
+            for fam, rgb in FEATURE_COLORS.items():
+                f.write(
+                    f"set_color {mol_prefix}_pli_pharm_{fam.lower()}_color, "
+                    f"[{rgb[0]:.4f}, {rgb[1]:.4f}, {rgb[2]:.4f}]\n"
+                )
+        f.write("recolor\n\n")
+
+        unique_residues = sorted(
+            {(rec["chain"], rec["residue_number"]) for rec in pli._interaction_records}
+        )
+        if unique_residues:
+            has_pocket = True
+            clauses = [
+                f"(chain {ch} and resi {rnum})" if ch else f"(resi {rnum})"
+                for ch, rnum in unique_residues
+            ]
+            f.write(f"select {pocket_sel}, polymer.protein and ({' or '.join(clauses)})\n")
+            f.write("deselect\n")
+            if pocket_repr is not None:
+                f.write(f"show {pocket_repr}, {pocket_sel}\n")
+                if pocket_repr == "lines":
+                    f.write(f"set line_width, {line_width}, {pocket_sel}\n")
+                f.write(f"util.cnc {pocket_sel}\n")
+            f.write("\n")
+            group_members.append(pocket_sel)
+
+        dash_idx = 0
+        for rec in pli._interaction_records:
+            itype = rec["interaction_type"]
+            if itype not in dash_prefixes:
+                continue
+            dash_idx += 1
+            prefix = dash_prefixes[itype]
+            obj_name = f"{mol_prefix}_{prefix}_{rec['residue_name']}{rec['residue_number']}_{dash_idx}"
+            color_key = (
+                (itype if split_hbonds else "HBond")
+                if itype in ("HBond_Donor", "HBond_Acceptor")
+                else itype
+            )
+            lx, ly, lz = rec["ligand_coords"]
+            px, py, pz = rec["protein_coords"]
+
+            f.write(f"pseudoatom _pli_tmp_a, pos=[{lx}, {ly}, {lz}]\n")
+            f.write(f"pseudoatom _pli_tmp_b, pos=[{px}, {py}, {pz}]\n")
+            f.write(f"distance {obj_name}, _pli_tmp_a, _pli_tmp_b\n")
+            f.write("delete _pli_tmp_a\n")
+            f.write("delete _pli_tmp_b\n")
+            f.write(f"set dash_color, {mol_prefix}_pli_{color_key.lower()}_color, {obj_name}\n")
+            if dash_gap is not None:
+                f.write(f"set dash_gap, {dash_gap}, {obj_name}\n")
+            if dash_width is not None:
+                f.write(f"set dash_width, {dash_width}, {obj_name}\n")
+            if dash_radius is not None:
+                f.write(f"set dash_radius, {dash_radius}, {obj_name}\n")
+            if not show_labels:
+                f.write(f"hide labels, {obj_name}\n")
+            f.write("\n")
+            group_members.append(obj_name)
+
+        if include_pharmacophore:
+            feats = pli._to_pharmacophore()
+            coord_groups: dict[tuple[float, float, float], list[int]] = {}
+            for idx, (_, _, x, y, z) in enumerate(feats):
+                key = (round(float(x), 3), round(float(y), 3), round(float(z), 3))
+                coord_groups.setdefault(key, []).append(idx)
+
+            pharm_counts: dict[str, int] = {}
+            split_specs = []
+            for idx, (fam, _, x, y, z) in enumerate(feats):
+                pharm_counts[fam] = pharm_counts.get(fam, 0) + 1
+                obj_name = f"{mol_prefix}_pli_pharm_{fam}_{pharm_counts[fam]}"
+                key = (round(float(x), 3), round(float(y), 3), round(float(z), 3))
+                group = coord_groups[key]
+                if len(group) == 1:
+                    f.write(f"pseudoatom {obj_name}, pos=[{x}, {y}, {z}]\n")
+                    f.write(f"show spheres, {obj_name}\n")
+                    f.write(f"hide nonbonded, {obj_name}\n")
+                    f.write(f"color {mol_prefix}_pli_pharm_{fam.lower()}_color, {obj_name}\n")
+                    f.write(f"set sphere_scale, {sphere_size}, {obj_name}\n")
+                    f.write(f"set sphere_transparency, 0.25, {obj_name}\n\n")
+                else:
+                    rank = group.index(idx)
+                    k = len(group)
+                    phi0 = 2.0 * math.pi * rank / k
+                    phi1 = 2.0 * math.pi * (rank + 1) / k
+                    rgb = tuple(FEATURE_COLORS.get(fam, (0.5, 0.5, 0.5)))
+                    split_specs.append((obj_name, float(x), float(y), float(z), rgb, phi0, phi1))
+                group_members.append(obj_name)
+
+            if split_specs:
+                f.write(
+                    format_pymol_split_spheres_block(
+                        split_specs,
+                        sphere_scale=sphere_size,
+                        transparency=0.25,
+                    )
+                )
+
+        if group_members:
+            f.write(f"group {mol_prefix}_pli_interactions, {' '.join(group_members)}\n")
+        f.write("set auto_zoom, on\n")
+        if has_pocket:
+            f.write(f"zoom {pocket_sel}, 6\n")
+
+    if verbose:
+        print(f"Protein–ligand interaction script written to {savepath_str}.")
 
 
 def _rgb_to_hex(rgb: tuple[float, float, float]) -> str:
