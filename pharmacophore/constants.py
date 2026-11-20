@@ -2,10 +2,11 @@
 Hold constant values
 """
 import os
+import re
 import matplotlib.colors as mcolors
 from rdkit import Chem
 from rdkit.Chem import AllChem, RDConfig
-from typing import Optional
+from typing import Optional, Union
 
 feature_factory = AllChem.BuildFeatureFactory(os.path.join(RDConfig.RDDataDir, 'BaseFeatures.fdef'))
 
@@ -71,6 +72,117 @@ def color_convert(color: Optional[str] = None):
         return rgb
     except:
         raise ValueError(f"{color} is not a valid color!")
+
+
+def sanitize_pymol_name(name: Optional[str], fallback: str = "Mol") -> str:
+    """
+    Sanitize a molecule or feature name for safe use in PyMOL object identifiers and filenames.
+    :param name: Optional[str]
+        Raw name string.
+    :param fallback: str
+        Fallback identifier returned when sanitization yields an empty string. Defaults to ``'Mol'``.
+    :return: str
+        Identifier containing only ASCII letters, digits, and underscores.
+    """
+    text = "" if name is None else str(name).strip()
+    cleaned = re.sub(r"[^A-Za-z0-9_]+", "_", text).strip("_")
+    return cleaned or fallback
+
+
+def unique_pymol_names(names: list[str]) -> list[str]:
+    """
+    Sanitize a list of molecule names and disambiguate case-insensitive duplicates so PyMOL
+    objects and output filenames never collide.
+    :param names: list[str]
+        Sequence of raw molecule names.
+    :return: list[str]
+        Unique sanitized identifiers preserving the input order.
+    """
+    sanitized = [sanitize_pymol_name(n, fallback=f"Mol_{i}") for i, n in enumerate(names)]
+    counts: dict[str, int] = {}
+    for s in sanitized:
+        key = s.lower()
+        counts[key] = counts.get(key, 0) + 1
+
+    used_lower: set[str] = set()
+    unique: list[str] = []
+    for i, s in enumerate(sanitized):
+        candidate = s
+        if counts[s.lower()] > 1 or candidate.lower() in used_lower:
+            candidate = f"{s}_{i}"
+            k = 1
+            while candidate.lower() in used_lower:
+                candidate = f"{s}_{i}_{k}"
+                k += 1
+        used_lower.add(candidate.lower())
+        unique.append(candidate)
+    return unique
+
+
+def resolve_pml_output_paths(
+    savepath: Optional[Union[str, os.PathLike]],
+    mol_names: list[str],
+    suffix: str,
+) -> tuple[list[str], list[str]]:
+    """
+    Resolve one or more PyMOL ``.pml`` output paths from ``savepath`` and molecule names.
+
+    For a single molecule, ``savepath`` may be either an explicit ``.pml`` file path or an output
+    directory (writing ``<dir>/<mol_name>_<suffix>.pml``). For multiple molecules, ``savepath`` must
+    be an output directory and produces one ``<mol_name>_<suffix>.pml`` file per molecule.
+    :param savepath: Optional[Union[str, os.PathLike]]
+        Required ``.pml`` file path (single molecule) or output directory path.
+    :param mol_names: list[str]
+        Molecule names corresponding to the items being exported.
+    :param suffix: str
+        Filename suffix placed before ``.pml`` when writing inside a directory (e.g. ``'pli'``,
+        ``'cliffs'``, or ``'pharmacophore'``).
+    :return: tuple[list[str], list[str]]
+        Tuple of ``(output_paths, safe_names)`` aligned with ``mol_names``.
+    """
+    if savepath is None or not isinstance(savepath, (str, os.PathLike)):
+        raise ValueError("savepath must be a non-empty .pml file path or output directory.")
+    raw_path = os.fspath(savepath)
+    if not isinstance(raw_path, str):
+        raise ValueError("savepath must be a non-empty .pml file path or output directory.")
+    savepath_str = raw_path.strip()
+    if not savepath_str:
+        raise ValueError("savepath must be a non-empty .pml file path or output directory.")
+    if not mol_names:
+        raise ValueError("At least one molecule is required to export a .pml script.")
+
+    safe_names = unique_pymol_names(mol_names)
+    is_pml_file = savepath_str.lower().endswith(".pml")
+
+    if len(safe_names) == 1:
+        if is_pml_file:
+            if os.path.isdir(savepath_str):
+                raise ValueError(
+                    f"savepath {savepath_str!r} is an existing directory; expected a .pml file path."
+                )
+            parent_dir = os.path.dirname(savepath_str)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
+            return [savepath_str], safe_names
+        if os.path.isfile(savepath_str):
+            raise ValueError(
+                f"savepath {savepath_str!r} is an existing file; expected a .pml file path or output directory."
+            )
+        os.makedirs(savepath_str, exist_ok=True)
+        return [os.path.join(savepath_str, f"{safe_names[0]}_{suffix}.pml")], safe_names
+
+    if is_pml_file:
+        raise ValueError(
+            f"Multiple molecules ({len(safe_names)}) require an output directory for savepath, "
+            f"got .pml file path {savepath_str!r}."
+        )
+    if os.path.isfile(savepath_str):
+        raise ValueError(
+            f"savepath {savepath_str!r} is an existing file; expected an output directory for "
+            f"{len(safe_names)} molecules."
+        )
+    os.makedirs(savepath_str, exist_ok=True)
+    return [os.path.join(savepath_str, f"{name}_{suffix}.pml") for name in safe_names], safe_names
 
 
 def is_hbond_acceptor_nitrogen(atom: Chem.Atom) -> bool:
@@ -220,7 +332,7 @@ METAL_ATOMIC_NUMS = frozenset({11, 12, 19, 20, 25, 26, 27, 28, 29, 30, 48, 80})
 
 DEFAULT_POCKET_CUTOFF = 6.0
 
-# Default 3D interaction cutoffs (Å and degrees with relaxed offset pi-stacking)
+# Default 3D interaction cutoffs (Å and degrees, Maestro-aligned)
 DEFAULT_HBOND_DIST = 3.5
 DEFAULT_HBOND_H_DIST = 2.8
 DEFAULT_HBOND_ANGLE = 120.0
@@ -232,9 +344,9 @@ DEFAULT_XBOND_ACCEPTOR_ANGLE = 90.0
 DEFAULT_HYDROPHOBIC_DIST = 4.0
 DEFAULT_IONIC_DIST = 5.0
 DEFAULT_PI_STACKING_DIST = 5.5
-DEFAULT_PI_FACE_DIST = 5.0
-DEFAULT_PI_FACE_ANGLE = 40.0
-DEFAULT_PI_EDGE_ANGLE = 50.0
+DEFAULT_PI_FACE_DIST = 4.4
+DEFAULT_PI_FACE_ANGLE = 30.0
+DEFAULT_PI_EDGE_ANGLE = 60.0
 DEFAULT_CATION_PI_DIST = 6.0
 DEFAULT_CATION_PI_ANGLE = 30.0
 DEFAULT_METAL_DIST = 2.8
