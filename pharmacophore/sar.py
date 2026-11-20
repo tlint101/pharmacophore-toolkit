@@ -1,4 +1,5 @@
 import json
+import os
 import pandas as pd
 import numpy as np
 import py3Dmol
@@ -9,7 +10,7 @@ from rdkit.Avalon import pyAvalonTools
 import matplotlib.colors as mcolors
 from typing import Optional, Union
 
-from pharmacophore.constants import is_hbond_acceptor_nitrogen
+from pharmacophore.constants import is_hbond_acceptor_nitrogen, resolve_pml_output_paths
 
 
 def _cliff_atom_roles(atom: Chem.Atom) -> tuple[bool, bool]:
@@ -44,6 +45,8 @@ class SAR:
         self.type = type.lower()
 
         self.atom_difference = None
+        self.mols: Optional[list[Chem.Mol]] = None
+        self._mcs_mol: Optional[Chem.Mol] = None
         self.smi_col = smi_col
         self.act_col = act_col
 
@@ -203,6 +206,7 @@ class SAR:
         # find mcs and create RDKit object
         mcs = rdFMCS.FindMCS(mol_list)
         mcs_mol = Chem.MolFromSmarts(mcs.smartsString)
+        self._mcs_mol = mcs_mol
 
         # align mols
         try:
@@ -268,87 +272,182 @@ class SAR:
 
         return img
 
-    def output_cliffs(self, mols: Optional[Chem.Mol] = None, savepath: Optional[str] = None):
+    def _diff_indices_for_mol(self, mol: Chem.Mol, mol_idx: Optional[int] = None) -> list[int]:
         """
-        Output the activity cliffs for molecule as .pml file for rendering in PyMOL.
-        :param mols: Optional[Chem.Mol]
-            Input the RDKit molecule object to generate the activity cliffs.
-        :param savepath: Optional[str]
-            Savepath for the .pml file.
-        :return:
+        Return heavy-atom indices in ``mol`` that fall outside the shared MCS.
+
+        When ``highlight_cliffs()`` has stored ``self._mcs_mol``, matches the MCS directly onto ``mol``
+        so differences reflect ``mol``'s own atom ordering (including 3D ``.sdf`` poses with explicit Hs).
+        Falls back to per-molecule ``self.atom_difference`` indexing when ``self._mcs_mol`` is not set.
+        """
+        if self._mcs_mol is not None:
+            match_atoms = mol.GetSubstructMatch(self._mcs_mol)
+            if not match_atoms and any(a.GetAtomicNum() == 1 for a in mol.GetAtoms()):
+                tagged = Chem.Mol(mol)
+                for atom in tagged.GetAtoms():
+                    atom.SetIntProp("_sar_full_idx", atom.GetIdx())
+                mol_no_h = Chem.RemoveHs(tagged)
+                no_h_match = mol_no_h.GetSubstructMatch(self._mcs_mol)
+                if no_h_match:
+                    match_atoms = tuple(
+                        mol_no_h.GetAtomWithIdx(i).GetIntProp("_sar_full_idx")
+                        for i in no_h_match
+                    )
+            if match_atoms:
+                match_set = set(match_atoms)
+                return [
+                    atom.GetIdx()
+                    for atom in mol.GetAtoms()
+                    if atom.GetAtomicNum() > 1 and atom.GetIdx() not in match_set
+                ]
+
+        if self.atom_difference is None:
+            raise ValueError(
+                "No activity-cliff atom differences found. Call highlight_cliffs() before "
+                "view_cliffs() or output_cliffs()."
+            )
+        if not self.atom_difference:
+            return []
+
+        if mol_idx is not None:
+            if 0 <= mol_idx < len(self.atom_difference):
+                raw = self.atom_difference[mol_idx]
+            elif len(self.atom_difference) == 1:
+                raw = self.atom_difference[0]
+            else:
+                raise IndexError(
+                    f"mol_idx={mol_idx} out of range for atom_difference of length {len(self.atom_difference)}."
+                )
+        elif len(self.atom_difference) == 1:
+            raw = self.atom_difference[0]
+        else:
+            raise IndexError(
+                "Cannot infer molecule index for atom_difference when multiple entries exist."
+            )
+
+        num_atoms = mol.GetNumAtoms()
+        return [idx for idx in raw if 0 <= idx < num_atoms]
+
+    def _resolve_mol_names(
+        self,
+        mol_list: list[Chem.Mol],
+        mol_names: Optional[Union[str, list[str], tuple[str, ...]]] = None,
+    ) -> list[str]:
+        """Resolve molecule names from explicit input, ``_Name``, ``self.data['name']``, or canonical SMILES."""
+        if mol_names is not None:
+            if isinstance(mol_names, str):
+                if len(mol_list) != 1:
+                    raise ValueError(
+                        f"Expected {len(mol_list)} molecule names in mol_names, got single string {mol_names!r}."
+                    )
+                return [mol_names]
+            if isinstance(mol_names, (list, tuple)):
+                if len(mol_names) != len(mol_list):
+                    raise ValueError(
+                        f"Length of mol_names ({len(mol_names)}) must match number of molecules ({len(mol_list)})."
+                    )
+                return ["" if n is None else str(n) for n in mol_names]
+            raise TypeError("mol_names must be a string or a sequence of strings.")
+
+        has_name_col = "name" in self.data.columns
+        smi_to_name: dict[str, str] = {}
+        if has_name_col and self.smi_col in self.data.columns:
+            for smi_val, name_val in zip(self.data[self.smi_col].tolist(), self.data["name"].tolist()):
+                ref_mol = Chem.MolFromSmiles(str(smi_val)) if smi_val is not None else None
+                if ref_mol is not None and pd.notna(name_val):
+                    can_smi = Chem.MolToSmiles(ref_mol, canonical=True)
+                    name_str = str(name_val).strip()
+                    if name_str and can_smi not in smi_to_name:
+                        smi_to_name[can_smi] = name_str
+
+        resolved: list[str] = []
+        for i, mol in enumerate(mol_list):
+            prop_name = mol.GetProp("_Name").strip() if mol.HasProp("_Name") else ""
+            if prop_name:
+                resolved.append(prop_name)
+                continue
+            if has_name_col and len(mol_list) == len(self.data):
+                row_name = self.data["name"].iloc[i]
+                if pd.notna(row_name) and str(row_name).strip():
+                    resolved.append(str(row_name).strip())
+                    continue
+            mol_no_h = Chem.RemoveHs(Chem.Mol(mol))
+            can_mol = Chem.MolToSmiles(mol_no_h, canonical=True)
+            if can_mol in smi_to_name:
+                resolved.append(smi_to_name[can_mol])
+                continue
+            resolved.append(f"Mol_{i}")
+        return resolved
+
+    def output_cliffs(
+        self,
+        mols: Optional[Union[Chem.Mol, list[Chem.Mol], tuple[Chem.Mol, ...]]] = None,
+        savepath: Optional[Union[str, os.PathLike]] = None,
+        mol_names: Optional[Union[str, list[str]]] = None,
+    ) -> Union[str, list[str]]:
+        """
+        Output the 3D activity cliffs for one or more molecules as PyMOL ``.pml`` script(s).
+
+        For a single molecule, ``savepath`` may be a ``.pml`` file path or an output directory
+        (writing ``<dir>/<mol_name>_cliffs.pml``). For multiple molecules, ``savepath`` must be an
+        output directory and writes ``<mol_name>_cliffs.pml`` per molecule with molecule-prefixed
+        PyMOL object and group names.
+        :param mols: Optional[Union[Chem.Mol, list[Chem.Mol], tuple[Chem.Mol, ...]]]
+            Single 3D RDKit ``Chem.Mol``, sequence of ``Chem.Mol`` objects, or ``None`` to use the
+            molecules previously passed to ``view_cliffs()``.
+        :param savepath: Optional[Union[str, os.PathLike]]
+            Required ``.pml`` file path (single molecule) or output directory path (single or multiple molecules).
+        :param mol_names: Optional[Union[str, list[str]]]
+            Optional molecule name(s) used for ``<mol_name>_cliffs.pml`` filenames and PyMOL object prefixes.
+        :return: Union[str, list[str]]
+            Written ``.pml`` path for a single molecule, or list of written paths for multiple molecules.
         """
         if mols is None:
-            mol = self.mols
+            if self.mols is None:
+                raise ValueError("No molecules available. Pass mols or call view_cliffs() first.")
+            mol_list = list(self.mols)
+        elif isinstance(mols, Chem.Mol):
+            mol_list = [mols]
+        elif isinstance(mols, (list, tuple)):
+            if not mols:
+                raise ValueError("mols sequence cannot be empty.")
+            for idx, m in enumerate(mols):
+                if not isinstance(m, Chem.Mol):
+                    raise TypeError(f"Expected RDKit Chem.Mol at mols[{idx}], got {type(m).__name__}.")
+            mol_list = list(mols)
         else:
-            mol = mols
+            raise TypeError("mols must be an RDKit Chem.Mol, a sequence of Chem.Mol objects, or None.")
 
-        flat_indices = [idx for sublist in self.atom_difference for idx in sublist]
-        # check if indices found in query mol
-        flat_indices = [idx for idx in flat_indices if idx < mol.GetNumAtoms()]
+        if self._mcs_mol is None and self.atom_difference is None:
+            raise ValueError(
+                "No activity-cliff atom differences found. Call highlight_cliffs() before output_cliffs()."
+            )
 
-        with open(savepath, "w") as f:
-            # define color scheme
-            f.write("set_color Hydrophob, [46, 204, 113]\n")
-            f.write("set_color HDonor, [33, 150, 243]\n")
-            f.write("set_color HAcceptor, [244, 67, 54]\n")
-            f.write("set_color DualH, [255, 0, 255]\n")
-            f.write("set_color Aromatic, [255, 235, 59]\n")
+        for idx, m in enumerate(mol_list):
+            if m.GetNumConformers() == 0:
+                raise ValueError(
+                    f"Molecule at index {idx} has no 3D conformer. Embed or load 3D coordinates before output_cliffs()."
+                )
 
-            # generate aromatic psudoatom points
-            conf = mol.GetConformer()
-            aromatic_atom_indices = set()
-            ring_info = mol.GetRingInfo()
-            for x, ring in enumerate(ring_info.AtomRings()):
-                if all(mol.GetAtomWithIdx(idx).GetIsAromatic() for idx in ring):
-                    if any(idx in flat_indices for idx in ring):
-                        coords = [conf.GetAtomPosition(idx) for idx in ring]
-                        centroid = np.mean(coords, axis=0)
+        names = self._resolve_mol_names(mol_list, mol_names=mol_names)
+        out_paths, safe_names = resolve_pml_output_paths(savepath, names, suffix="cliffs")
 
-                        obj_name = f"Aromatic_{x}"
-                        f.write(
-                            f"pseudoatom {obj_name}, pos=[{centroid[0]:.3f}, {centroid[1]:.3f}, {centroid[2]:.3f}]\n")
-                        f.write(f"show spheres, {obj_name}\n")
-                        f.write(f"hide nonbonded, {obj_name}\n")  # This removes the "plus" sign
-                        f.write(f"set sphere_scale, 0.5, {obj_name}\n")
-                        f.write(f"color Aromatic, {obj_name}\n")
-                        f.write(f"set sphere_transparency, 0.0, {obj_name}\n")
+        is_multi = len(out_paths) > 1
+        for idx, (mol, out_path, mol_prefix) in enumerate(zip(mol_list, out_paths, safe_names)):
+            diff_indices = self._diff_indices_for_mol(mol, mol_idx=idx)
+            _write_single_cliff_pml(
+                mol=mol,
+                diff_indices=diff_indices,
+                mol_prefix=mol_prefix,
+                savepath=out_path,
+                verbose=not is_multi,
+            )
 
-                        for idx in ring:
-                            aromatic_atom_indices.add(idx)
+        if is_multi:
+            print(f"Number of molecules: {len(out_paths)}")
+            print(f"Activity cliff scripts written to {str(savepath).strip()}.")
 
-            # generate atom points
-            for idx in flat_indices:
-                atom = mol.GetAtomWithIdx(idx)
-                symbol = atom.GetSymbol()
-                if symbol == 'H':
-                    continue
-                pos = conf.GetAtomPosition(idx)
-
-                donor, acceptor = _cliff_atom_roles(atom)
-
-                color = None
-                label = ""
-                if donor and acceptor:
-                    color, label = "DualH", "Dual"
-                elif donor:
-                    color, label = "HDonor", "Donor"
-                elif acceptor:
-                    color, label = "HAcceptor", "Acceptor"
-                elif idx not in aromatic_atom_indices and symbol in ['C', 'F', 'Cl', 'Br', 'I']:
-                    color, label = "Hydrophob", "Hydrophobic"
-
-                if color:
-                    obj_name = f"Pin_{label}_{idx}"
-                    f.write(f"pseudoatom {obj_name}, pos=[{pos.x:.3f}, {pos.y:.3f}, {pos.z:.3f}]\n")
-                    f.write(f"show spheres, {obj_name}\n")
-                    f.write(f"color {color}, {obj_name}\n")
-                    f.write(f"set sphere_transparency, 0.3, {obj_name}\n")
-                    # f.write(f"hide nonbonded, {obj_name}\n")  # This removes the "plus" sign
-                    # Smaller spheres for atoms inside aromatic rings
-                    scale = 0.7 if idx in aromatic_atom_indices else 1.0
-                    f.write(f"set sphere_scale, {scale}, {obj_name}\n")
-
-            f.write("zoom all\n")
+        return out_paths if is_multi else out_paths[0]
 
     def view_cliffs(self, mols: Union[Chem.Mol, list[Chem.Mol]] = None, protein_path: Optional[str] = None,
                     window: tuple = (500, 500), prefix: str = "cliffs"):
@@ -392,14 +491,17 @@ class SAR:
 
         widgets.interact(self._render_cliffs, index=dropdown)
 
-    def _cliff_shapes(self, mol):
+    def _cliff_shapes(self, mol, mol_idx: Optional[int] = None):
         """
         Support function for _render_cliffs and _marimo_cliffs. Computes the highlight spheres and the per-atom sphere
         styles for the atoms of one molecule that fall outside the MCS.
         """
-        flat_indices = [idx for sublist in self.atom_difference for idx in sublist]
-        # check if indices found in query mol
-        flat_indices = [idx for idx in flat_indices if idx < mol.GetNumAtoms()]
+        if mol.GetNumConformers() == 0:
+            raise ValueError(
+                "Molecule has no 3D conformer. Embed or load 3D coordinates before rendering activity cliffs."
+            )
+
+        diff_indices = self._diff_indices_for_mol(mol, mol_idx=mol_idx)
 
         # track aromatic atoms
         spheres = []
@@ -408,7 +510,7 @@ class SAR:
         for ring in ring_info.AtomRings():
             # check if aromatic atom not in MCS
             if all(mol.GetAtomWithIdx(idx).GetIsAromatic() for idx in ring):
-                if any(idx in flat_indices for idx in ring):
+                if any(idx in diff_indices for idx in ring):
                     # calculate centroid
                     conf = mol.GetConformer()
                     coords = [conf.GetAtomPosition(idx) for idx in ring]
@@ -426,7 +528,7 @@ class SAR:
 
         # track other atoms
         atoms = []
-        for idx in flat_indices:
+        for idx in diff_indices:
             atom = mol.GetAtomWithIdx(idx)
             symbol = atom.GetSymbol()
             if symbol == 'H':
@@ -491,7 +593,7 @@ class SAR:
         viewer.addModel(Chem.MolToPDBBlock(mol), "mol")
         viewer.setStyle({'model': -1}, {'stick': {'radius': 0.15, 'colorscheme': 'grayCarbon'}})
 
-        spheres, atoms = self._cliff_shapes(mol)
+        spheres, atoms = self._cliff_shapes(mol, mol_idx=index)
         for sphere in spheres:
             viewer.addSphere(sphere)
 
@@ -515,7 +617,7 @@ class SAR:
         # serialize molecule data
         data = []
         for i, mol in enumerate(self.mols):
-            spheres, atoms = self._cliff_shapes(mol)
+            spheres, atoms = self._cliff_shapes(mol, mol_idx=i)
             data.append({
                 "name": f"Molecule {i + 1}",
                 "mol": Chem.MolToMolBlock(mol),
@@ -613,6 +715,91 @@ class SAR:
         </script>"""
 
         return mo.iframe(html, height=f"{height + 110}px")
+
+
+def _write_single_cliff_pml(
+    mol: Chem.Mol,
+    diff_indices: list[int],
+    mol_prefix: str,
+    savepath: str,
+    verbose: bool = True,
+) -> None:
+    """Write a PyMOL ``.pml`` script highlighting one molecule's non-MCS activity-cliff features."""
+    with open(savepath, "w") as f:
+        f.write("# Drag-and-drop PyMOL script generated by pharmacophore-toolkit (SAR)\n")
+        f.write("set auto_zoom, off\n\n")
+
+        f.write("set_color Hydrophob, [46, 204, 113]\n")
+        f.write("set_color HDonor, [33, 150, 243]\n")
+        f.write("set_color HAcceptor, [244, 67, 54]\n")
+        f.write("set_color DualH, [255, 0, 255]\n")
+        f.write("set_color Aromatic, [255, 235, 59]\n\n")
+
+        conf = mol.GetConformer()
+        aromatic_atom_indices = set()
+        group_members: list[str] = []
+        ring_info = mol.GetRingInfo()
+        for x, ring in enumerate(ring_info.AtomRings()):
+            if all(mol.GetAtomWithIdx(idx).GetIsAromatic() for idx in ring):
+                if any(idx in diff_indices for idx in ring):
+                    coords = [conf.GetAtomPosition(idx) for idx in ring]
+                    centroid = np.mean(coords, axis=0)
+
+                    obj_name = f"{mol_prefix}_Aromatic_{x}"
+                    f.write(
+                        f"pseudoatom {obj_name}, pos=[{centroid[0]:.3f}, {centroid[1]:.3f}, {centroid[2]:.3f}]\n"
+                    )
+                    f.write(f"show spheres, {obj_name}\n")
+                    f.write(f"hide nonbonded, {obj_name}\n")
+                    f.write(f"set sphere_scale, 0.5, {obj_name}\n")
+                    f.write(f"color Aromatic, {obj_name}\n")
+                    f.write(f"set sphere_transparency, 0.0, {obj_name}\n\n")
+                    group_members.append(obj_name)
+
+                    for idx in ring:
+                        aromatic_atom_indices.add(idx)
+
+        for idx in diff_indices:
+            atom = mol.GetAtomWithIdx(idx)
+            symbol = atom.GetSymbol()
+            if symbol == 'H':
+                continue
+            pos = conf.GetAtomPosition(idx)
+
+            donor, acceptor = _cliff_atom_roles(atom)
+
+            color = None
+            label = ""
+            if donor and acceptor:
+                color, label = "DualH", "Dual"
+            elif donor:
+                color, label = "HDonor", "Donor"
+            elif acceptor:
+                color, label = "HAcceptor", "Acceptor"
+            elif idx not in aromatic_atom_indices and symbol in ['C', 'F', 'Cl', 'Br', 'I']:
+                color, label = "Hydrophob", "Hydrophobic"
+
+            if color:
+                obj_name = f"{mol_prefix}_Pin_{label}_{idx}"
+                f.write(f"pseudoatom {obj_name}, pos=[{pos.x:.3f}, {pos.y:.3f}, {pos.z:.3f}]\n")
+                f.write(f"show spheres, {obj_name}\n")
+                f.write(f"color {color}, {obj_name}\n")
+                f.write(f"set sphere_transparency, 0.3, {obj_name}\n")
+                scale = 0.7 if idx in aromatic_atom_indices else 1.0
+                f.write(f"set sphere_scale, {scale}, {obj_name}\n\n")
+                group_members.append(obj_name)
+
+        group_name = f"{mol_prefix}_cliffs"
+        if group_members:
+            f.write(f"group {group_name}, {' '.join(group_members)}\n")
+        f.write("set auto_zoom, on\n")
+        if group_members:
+            f.write(f"zoom {group_name}\n")
+        else:
+            f.write("zoom all\n")
+
+    if verbose:
+        print(f"Activity cliff script written to {savepath}.")
 
 
 def _calculate_pic50(activity: Optional[list], units: str = "nM"):
