@@ -1,4 +1,5 @@
 import math
+import os
 import warnings
 import collections
 import pandas as pd
@@ -14,7 +15,20 @@ from pharmacophore.constants import (
     FEATURE_COLORS,
     color_convert,
     format_pymol_split_spheres_block,
+    resolve_pml_output_paths,
+    sanitize_pymol_name,
 )
+
+
+def _extract_mol_name(mol: Chem.Mol, idx: int = 0) -> str:
+    """Return a molecule's ``_Name`` property when non-empty, else ``Mol_{idx}``."""
+    prop_name = mol.GetProp("_Name").strip() if mol.HasProp("_Name") else ""
+    return prop_name or f"Mol_{idx}"
+
+
+def _is_single_feature_entry(item) -> bool:
+    """Return True if ``item`` matches ``[family, atom_indices, x, y, z]``."""
+    return isinstance(item, (list, tuple)) and len(item) == 5 and isinstance(item[0], str)
 
 
 class Pharmacophore:
@@ -27,6 +41,8 @@ class Pharmacophore:
         self.sdf = None
         self.features = features
         self.features_list = None
+        self.mol_names: Optional[list[str]] = None
+        self._features_is_batch: bool = False
 
     def read_sdf(self, sdf_file: Optional[str] = None, verbose: bool = False):
         """
@@ -159,37 +175,58 @@ class Pharmacophore:
 
         return feature_frequencies_df
 
-    def calc_pharm(self, mol: Optional[Chem.Mol] = None, features: Optional[Union[str, dict]] = None):
+    def _calc_single_pharm(self, mol: Chem.Mol, features: Union[str, dict]) -> list:
+        """Compute pharmacophore features for a single RDKit molecule."""
+        if features == 'rdkit':
+            return self._calc_rdkit(mol)
+        if features == 'default':
+            return self._calc_pharmacophore(mol)
+        if isinstance(features, dict):
+            return self._calc_pharmacophore(mol, features)
+        raise ValueError("Only 'default', 'rdkit', or custom features as dictionary are supported!")
+
+    def calc_pharm(
+        self,
+        mol: Optional[Union[Chem.Mol, list[Chem.Mol], tuple[Chem.Mol, ...]]] = None,
+        features: Optional[Union[str, dict]] = None,
+    ):
         """
-        Generate a list of pharmacophore features and position from a molecule.
-        :param mol: Optional[Chem.Mol]
-            A molecule in ROMol format.
-        :param features: str
+        Generate pharmacophore features and 3D positions from one or more molecules.
+        :param mol: Optional[Union[Chem.Mol, list[Chem.Mol], tuple[Chem.Mol, ...]]]
+            A single molecule or a sequence of molecules in RDKit ``Chem.Mol`` format.
+        :param features: Optional[Union[str, dict]]
             Designate the type of pharmacophore features to calculate from. Will default to "default" settings. This
             param can also accept "rdkit" to use RDKit default features or give a dictionary containing feature:list
             pair, where the list contains SMARTS string for a given feature.
         :return: list
-            A list of pharmacophore features, matching atom index, and position from a molecule.
+            For a single molecule, a list of ``[family, atom_indices, x, y, z]`` entries. For a sequence of
+            molecules, a list of per-molecule feature lists matching the input order.
         """
-        global pharmacophore
-        # set instance variable
+        if mol is None:
+            raise ValueError("mol cannot be None.")
         if features is None:
             features = self.features
 
-        # calculate pharmacophore by rdkit or pharmacophore dict
-        if features == 'rdkit':
-            pharmacophore = self._calc_rdkit(mol)
-        elif features == 'default':
-            pharmacophore = self._calc_pharmacophore(mol)
-        elif isinstance(features, dict):
-            pharmacophore = self._calc_pharmacophore(mol, features)
-        else:
-            raise ValueError("Only 'default', 'rdkit', or custom features as dictionary are supported!")
+        if isinstance(mol, Chem.Mol):
+            pharmacophore = self._calc_single_pharm(mol, features)
+            self.features_list = pharmacophore
+            self.mol_names = [_extract_mol_name(mol, 0)]
+            self._features_is_batch = False
+            return pharmacophore
 
-        # set features to self
-        self.features_list = pharmacophore
+        if isinstance(mol, (list, tuple)):
+            if not mol:
+                raise ValueError("mol sequence cannot be empty.")
+            for idx, m in enumerate(mol):
+                if not isinstance(m, Chem.Mol):
+                    raise TypeError(f"Expected RDKit Chem.Mol at mol[{idx}], got {type(m).__name__}.")
+            all_pharmacophores = [self._calc_single_pharm(m, features) for m in mol]
+            self.features_list = all_pharmacophores
+            self.mol_names = [_extract_mol_name(m, idx) for idx, m in enumerate(mol)]
+            self._features_is_batch = True
+            return all_pharmacophores
 
-        return pharmacophore
+        raise TypeError("mol must be an RDKit Chem.Mol or a sequence of Chem.Mol objects.")
 
     def add_feats(self, mol: Optional[Chem.Mol] = None, substruct: Optional[str] = None, type: Optional[str] = None):
         """
@@ -203,6 +240,13 @@ class Pharmacophore:
             allowed!
         :return:
         """
+        if self._features_is_batch:
+            raise ValueError(
+                "add_feats() operates on a single molecule's feature list. Call calc_pharm() on a single molecule first."
+            )
+        if self.features_list is None:
+            self.features_list = []
+
         # convert substruct smarts string into ROMol
         query = [Chem.MolFromSmarts(substruct)]
 
@@ -224,157 +268,130 @@ class Pharmacophore:
 
         return self.features_list
 
-    def output_features(self, feature_list: Optional[list] = None, type: str = "sphere", sphere_size: float = 0.7,
-                        transparency: float = 0.2, color: Optional[dict] = None, savepath: Optional[str] = None):
-        """
-        Output features as a .pml format for visualization in PyMol.
-        :param feature_list: Optional[list]
-            A list containing features, corresponding atom number, and 3D position. Preferably generated using the
-            calc_pharm method.
-        :param type: str = "Sphere"
-            Set the pharmacophore representation. Can be "sphere" or "surface". If surface is used, transparency can be
-            set for each pharmacophore.
-        :param sphere_size: float = 0.5
-            Set size of spheres.
-        :param transparency: float = 0.2
-            Set teh transparency of pharmacophore. Only works when the pharmacophore type is set to "surface".
-        :param color: Optional[dict]
-            Set color for the pharmacophores. Must be given as Acceptor: color where color is a tuple for RGB or a
-            string for a specific color to be translated into RGB format.
-        :param savepath: Optional[str] = None
-            Must be a file in .pml format.
-        :return:
-        """
+    def _normalize_feature_batches(
+        self,
+        feature_list: Optional[list],
+        mol_names: Optional[Union[str, list[str], tuple[str, ...]]],
+    ) -> tuple[list[list], list[str], bool]:
+        """Normalize single or multi-molecule feature inputs and resolve per-molecule names."""
         if feature_list is None:
-            feature_list = self.features_list
-
-        with open(savepath, "w") as f:
-            # feat_factory = feature_factory
-            # features = feat_factory.GetFeaturesForMol(mol)
-            print(f"Number of features: {len(feature_list)}")
-
-            # Resolve feature RGB colors for pseudoatom set_color and CGO wedges
-            resolved_colors = {k: tuple(v) for k, v in FEATURE_COLORS.items()}
-            if color is None:
-                for feat in FEATURE_COLORS:
-                    f.write(f"set_color {feat}_color, {FEATURE_COLORS[feat]}\n")
-            # if custom color, convert to RGB
-            elif isinstance(color, dict):
-                for shade in color:
-                    val = color[shade]
-                    rgb = (
-                        tuple(float(c) for c in val[:3])
-                        if isinstance(val, (tuple, list)) and len(val) in (3, 4)
-                        else tuple(color_convert(val))
-                    )
-                    resolved_colors[shade] = rgb
-                    # print(rgb)  # for troubleshooting
-                    f.write(f"set_color {shade}_color, {rgb}\n")
+            if self.features_list is None:
+                raise ValueError("No pharmacophore features available. Call calc_pharm() or pass feature_list.")
+            if self._features_is_batch:
+                batches = [list(feats) for feats in self.features_list]
             else:
-                warnings.warn("Issue with color features!")
-
-            # to give sequential numbering for each group:
-            feature_counts = {
-                "Acceptor": 0, "Donor": 0, "Hydrophobe": 0, "Aromatic": 0,
-                "LumpedHydrophobe": 0, "PosIonizable": 0, "NegIonizable": 0,
-            }
-            coord_groups = {}
-            for idx, feat in enumerate(feature_list):
-                coord_key = (round(float(feat[2]), 3), round(float(feat[3]), 3), round(float(feat[4]), 3))
-                coord_groups.setdefault(coord_key, []).append(idx)
-
-            split_specs = []
-            for idx, feat in enumerate(feature_list):
-                feature = feat[0]  # extract feature type
-                feature_counts[feature] += 1  # give feature count
-                count = feature_counts[feature]  # get current count
-                pos_x = feat[2]
-                pos_y = feat[3]
-                pos_z = feat[4]
-                obj_name = f"{feature}_{count}"
-                coord_key = (round(float(pos_x), 3), round(float(pos_y), 3), round(float(pos_z), 3))
-                group = coord_groups[coord_key]
-                if len(group) == 1:
-                    f.write(
-                        # f"pseudoatom {obj_name}, pos=[{pos_x}, {pos_y}, {pos_z}], color={color_type}\n"
-                        f"pseudoatom {obj_name}, pos=[{pos_x}, {pos_y}, {pos_z}]\n"
-                    )
-                else:
-                    rank = group.index(idx)
-                    k = len(group)
-                    phi0 = 2.0 * math.pi * rank / k
-                    phi1 = 2.0 * math.pi * (rank + 1) / k
-                    rgb = resolved_colors.get(feature, (0.5, 0.5, 0.5))
-                    split_specs.append((obj_name, float(pos_x), float(pos_y), float(pos_z), rgb, phi0, phi1))
-
-            # todo add mol name in front of pharmacophre
-            # set color and sphere size
-            f.write("\n")
-            if type == "sphere":
-                f.write("show spheres, Acceptor_*\n")
-                f.write("color acceptor_color, Acceptor_*\n")
-                f.write("\n")
-                f.write("show spheres, Donor_*\n")
-                f.write("color donor_color, Donor_*\n")
-                f.write("\n")
-                f.write("show spheres, Hydrophobe_*\n")
-                f.write("color hydrophobe_color, Hydrophobe_*\n")
-                f.write("\n")
-                f.write("show spheres, Aromatic_*\n")
-                f.write("color aromatic_color, Aromatic_*\n")
-                f.write("\n")
-                f.write("show spheres, LumpedHydrophobe_*\n")
-                f.write("color lumpedhydrophobe_color, LumpedHydrophobe_*\n")
-                f.write("\n")
-                f.write("show spheres, PosIonizable*\n")
-                f.write("color posionizable_color, PosIonizable*\n")
-                f.write("\n")
-                f.write("show spheres, NegIonizable_*\n")
-                f.write("color negionizable_color, NegIonizable_*\n")
-                f.write("\n")
-                f.write(f"set sphere_scale, {sphere_size}\n")  # Adjust sphere size in PyMOL
-            elif type == "surface":
-                f.write("show surface, Acceptor_*\n")
-                f.write("color acceptor_color, Acceptor_*\n")
-                f.write(f"set transparency, {transparency}, Acceptor_*\n")
-                f.write("\n")
-                f.write("show surface, Donor_*\n")
-                f.write("color donor_color, Donor_*\n")
-                f.write(f"set transparency, {transparency}, Donor_*\n")
-                f.write("\n")
-                f.write("show surface, Hydrophobe_*\n")
-                f.write("color hydrophobe_color, Hydrophobe_*\n")
-                f.write(f"set transparency, {transparency}, Hydrophobe_*\n")
-                f.write("\n")
-                f.write("show surface, Aromatic_*\n")
-                f.write("color aromatic_color, Aromatic_*\n")
-                f.write(f"set transparency, {transparency}, Aromatic_*\n")
-                f.write("\n")
-                f.write("show surface, LumpedHydrophobe_*\n")
-                f.write("color lumpedhydrophobe_color, LumpedHydrophobe_*\n")
-                f.write(f"set transparency, {transparency}, LumpedHydrophobe_*\n")
-                f.write("\n")
-                f.write("show surface, PosIonizable*\n")
-                f.write("color posionizable_color, PosIonizable*\n")
-                f.write(f"set transparency, {transparency}, PosIonizable*\n")
-                f.write("\n")
-                f.write("show surface, NegIonizable_*\n")
-                f.write("color negionizable_color, NegIonizable_*\n")
-                f.write(f"set transparency, {transparency}, NegIonizable_*\n")
-                f.write("\n")
+                batches = [list(self.features_list)]
+            if self.mol_names is not None and len(self.mol_names) == len(batches):
+                resolved_names = list(self.mol_names)
             else:
-                raise ValueError("Issue with type {type}! Only 'sphere' or 'surface' allowed!")
-
-            if split_specs:
-                f.write(
-                    format_pymol_split_spheres_block(
-                        split_specs,
-                        sphere_scale=(sphere_size if type == "sphere" else None),
-                        transparency=(0.0 if type == "sphere" else transparency),
-                    )
+                resolved_names = [f"Mol_{i}" for i in range(len(batches))]
+        else:
+            if not isinstance(feature_list, (list, tuple)):
+                raise ValueError("feature_list must be a list of features or a list of per-molecule feature lists.")
+            if len(feature_list) == 0:
+                batches = [[]]
+            elif all(_is_single_feature_entry(x) for x in feature_list):
+                batches = [list(feature_list)]
+            elif all(
+                isinstance(x, (list, tuple)) and all(_is_single_feature_entry(entry) for entry in x)
+                for x in feature_list
+            ):
+                batches = [list(x) for x in feature_list]
+            else:
+                raise ValueError(
+                    "Invalid feature_list format. Expected [family, atom_indices, x, y, z] entries "
+                    "or a sequence of per-molecule feature lists."
                 )
 
-        print(f"Feature visualization script written to {savepath}.")
+            if (
+                feature_list is self.features_list
+                and self.mol_names is not None
+                and len(self.mol_names) == len(batches)
+            ):
+                resolved_names = list(self.mol_names)
+            else:
+                resolved_names = [f"Mol_{i}" for i in range(len(batches))]
+
+        if mol_names is not None:
+            if isinstance(mol_names, str):
+                if len(batches) != 1:
+                    raise ValueError(
+                        f"Expected {len(batches)} molecule names in mol_names, got single string {mol_names!r}."
+                    )
+                resolved_names = [mol_names]
+            elif isinstance(mol_names, (list, tuple)):
+                if len(mol_names) != len(batches):
+                    raise ValueError(
+                        f"Length of mol_names ({len(mol_names)}) must match number of molecules ({len(batches)})."
+                    )
+                resolved_names = ["" if n is None else str(n) for n in mol_names]
+            else:
+                raise TypeError("mol_names must be a string or a sequence of strings.")
+
+        return batches, resolved_names, len(batches) > 1
+
+    def output_features(
+        self,
+        feature_list: Optional[list] = None,
+        mol_names: Optional[Union[str, list[str]]] = None,
+        type: str = "sphere",
+        sphere_size: float = 0.7,
+        transparency: float = 0.2,
+        color: Optional[dict] = None,
+        savepath: Optional[Union[str, os.PathLike]] = None,
+
+    ) -> Union[str, list[str]]:
+        """
+        Output features for one or more molecules as ``.pml`` script(s) for visualization in PyMOL.
+
+        For a single molecule, ``savepath`` may be a ``.pml`` file path or an output directory
+        (writing ``<dir>/<mol_name>_pharmacophore.pml``). For multiple molecules, ``savepath`` must be an
+        output directory and writes ``<mol_name>_pharmacophore.pml`` per molecule with molecule-prefixed
+        PyMOL object and group names.
+        :param feature_list: Optional[list]
+            A feature list from ``calc_pharm(mol)``, a list of per-molecule feature lists from
+            ``calc_pharm(mols)``, or ``None`` to use the last result stored by ``calc_pharm()``.
+        :param mol_names: Optional[Union[str, list[str]]] = None
+            Optional molecule name(s) used for ``<mol_name>_pharmacophore.pml`` filenames and PyMOL object prefixes.
+            Defaults to names recorded by ``calc_pharm()`` or ``Mol_0``, ``Mol_1``, etc.
+        :param type: str = "sphere"
+            Set the pharmacophore representation. Can be "sphere" or "surface". If surface is used, transparency can be
+            set for each pharmacophore.
+        :param sphere_size: float = 0.7
+            Set size of spheres.
+        :param transparency: float = 0.2
+            Set the transparency of pharmacophore. Only works when the pharmacophore type is set to "surface".
+        :param color: Optional[dict]
+            Set color for the pharmacophores. Must be given as ``{family: color}`` where color is a tuple for RGB
+            or a string for a specific color to be translated into RGB format.
+        :param savepath: Optional[Union[str, os.PathLike]] = None
+            Required ``.pml`` file path (single molecule) or output directory path (single or multiple molecules).
+        :return: Union[str, list[str]]
+            Written ``.pml`` path for a single molecule, or list of written paths for multiple molecules.
+        """
+        if type not in ("sphere", "surface"):
+            raise ValueError(f"Issue with type {type!r}! Only 'sphere' or 'surface' allowed!")
+
+        batches, resolved_names, is_multi = self._normalize_feature_batches(feature_list, mol_names)
+        out_paths, safe_names = resolve_pml_output_paths(savepath, resolved_names, suffix="pharmacophore")
+
+        for feats, out_path, mol_prefix in zip(batches, out_paths, safe_names):
+            _write_single_features_pml(
+                feature_list=feats,
+                mol_prefix=mol_prefix,
+                savepath=out_path,
+                type=type,
+                sphere_size=sphere_size,
+                transparency=transparency,
+                color=color,
+                verbose=not is_multi,
+            )
+
+        if is_multi:
+            print(f"Number of molecules: {len(out_paths)}")
+            print(f"Feature visualization scripts written to {str(savepath).strip()}.")
+
+        return out_paths if is_multi else out_paths[0]
 
     def _calc_pharmacophore(self, mol: Optional[Chem.Mol] = None, features: Optional[dict] = None):
         """
@@ -386,7 +403,6 @@ class Pharmacophore:
         :return:
             List of pharmacophore type and centroid coordinates.
         """
-        global pharmacophore
         # read in custom feature dict
         if features is None:
             constant_feats = FEATURES
@@ -446,8 +462,6 @@ class Pharmacophore:
         :return:
             List of pharmacophore type and centroid coordinates.
         """
-        global pharmacophore
-
         # load default RDKit feature factory file
         feat_factory = feature_factory
 
@@ -467,6 +481,114 @@ class Pharmacophore:
 
 
 # Support function to fix bond order of molecule
+def _write_single_features_pml(
+    feature_list: list,
+    mol_prefix: str,
+    savepath: str,
+    type: str = "sphere",
+    sphere_size: float = 0.7,
+    transparency: float = 0.2,
+    color: Optional[dict] = None,
+    verbose: bool = True,
+) -> None:
+    """Write a PyMOL ``.pml`` script for one molecule's pharmacophore features."""
+    with open(savepath, "w") as f:
+        if verbose:
+            print(f"Number of features: {len(feature_list)}")
+        f.write("# Drag-and-drop PyMOL script generated by pharmacophore-toolkit (Pharmacophore)\n")
+        f.write("set auto_zoom, off\n\n")
+
+        resolved_colors = {k: tuple(float(c) for c in v[:3]) for k, v in FEATURE_COLORS.items()}
+        if color is not None:
+            if isinstance(color, dict):
+                for shade, val in color.items():
+                    rgb = (
+                        tuple(float(c) for c in val[:3])
+                        if isinstance(val, (tuple, list)) and len(val) in (3, 4)
+                        else tuple(color_convert(val))
+                    )
+                    resolved_colors[shade] = rgb
+            else:
+                warnings.warn("Issue with color features!")
+
+        for feat in feature_list:
+            fam = str(feat[0])
+            if fam not in resolved_colors:
+                resolved_colors[fam] = (0.5, 0.5, 0.5)
+
+        emitted_color_names: set[str] = set()
+        family_color_name: dict[str, str] = {}
+        for fam, rgb in resolved_colors.items():
+            safe_fam = sanitize_pymol_name(fam, fallback="Feature")
+            cname = f"{mol_prefix}_{safe_fam.lower()}_color"
+            family_color_name[fam] = cname
+            if cname not in emitted_color_names:
+                emitted_color_names.add(cname)
+                f.write(f"set_color {cname}, [{rgb[0]:.4f}, {rgb[1]:.4f}, {rgb[2]:.4f}]\n")
+
+        feature_counts: dict[str, int] = {}
+        coord_groups: dict[tuple[float, float, float], list[int]] = {}
+        for idx, feat in enumerate(feature_list):
+            coord_key = (round(float(feat[2]), 3), round(float(feat[3]), 3), round(float(feat[4]), 3))
+            coord_groups.setdefault(coord_key, []).append(idx)
+
+        single_families: list[tuple[str, str]] = []
+        seen_single_families: set[str] = set()
+        group_members: list[str] = []
+        split_specs = []
+
+        for idx, feat in enumerate(feature_list):
+            feature = str(feat[0])
+            safe_feat = sanitize_pymol_name(feature, fallback="Feature")
+            feature_counts[safe_feat] = feature_counts.get(safe_feat, 0) + 1
+            count = feature_counts[safe_feat]
+            pos_x, pos_y, pos_z = feat[2], feat[3], feat[4]
+            obj_name = f"{mol_prefix}_{safe_feat}_{count}"
+            group_members.append(obj_name)
+            coord_key = (round(float(pos_x), 3), round(float(pos_y), 3), round(float(pos_z), 3))
+            group = coord_groups[coord_key]
+            if len(group) == 1:
+                f.write(f"pseudoatom {obj_name}, pos=[{pos_x}, {pos_y}, {pos_z}]\n")
+                if safe_feat not in seen_single_families:
+                    seen_single_families.add(safe_feat)
+                    single_families.append((safe_feat, family_color_name[feature]))
+            else:
+                rank = group.index(idx)
+                k = len(group)
+                phi0 = 2.0 * math.pi * rank / k
+                phi1 = 2.0 * math.pi * (rank + 1) / k
+                rgb = resolved_colors.get(feature, (0.5, 0.5, 0.5))
+                split_specs.append((obj_name, float(pos_x), float(pos_y), float(pos_z), rgb, phi0, phi1))
+
+        f.write("\n")
+        for safe_feat, cname in single_families:
+            pattern = f"{mol_prefix}_{safe_feat}_*"
+            if type == "sphere":
+                f.write(f"show spheres, {pattern}\n")
+                f.write(f"color {cname}, {pattern}\n")
+                f.write(f"set sphere_scale, {sphere_size}, {pattern}\n\n")
+            elif type == "surface":
+                f.write(f"show surface, {pattern}\n")
+                f.write(f"color {cname}, {pattern}\n")
+                f.write(f"set transparency, {transparency}, {pattern}\n\n")
+
+        if split_specs:
+            f.write(
+                format_pymol_split_spheres_block(
+                    split_specs,
+                    sphere_scale=(sphere_size if type == "sphere" else None),
+                    transparency=(0.0 if type == "sphere" else transparency),
+                )
+            )
+
+        if group_members:
+            f.write(f"group {mol_prefix}_pharmacophore, {' '.join(group_members)}\n")
+        f.write("set auto_zoom, on\n")
+
+    if verbose:
+        print(f"Feature visualization script written to {savepath}.")
+
+
 def fix_bond_order(mol: Chem.Mol, template_smi: str, savepath: Optional[str] = None):
     """
     Fix bond order for a given molecule. A template smiles string must be given.
